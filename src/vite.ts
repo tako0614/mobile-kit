@@ -19,7 +19,7 @@ export function createTauriMobileViteConfig(
   const host = (input.env ?? process.env).TAURI_DEV_HOST;
   const mobileKitRoot = input.mobileKitRootUrl
     ? new URL(input.mobileKitRootUrl, input.importMetaUrl)
-    : new URL("../../takosumi/mobile-kit/", input.importMetaUrl);
+    : new URL("../mobile-kit/", input.importMetaUrl);
   return {
     plugins: [...(input.plugins ?? [])],
     resolve: {
@@ -27,10 +27,10 @@ export function createTauriMobileViteConfig(
       alias: input.resolveMobileKitFromPackage
         ? {}
         : {
-            "@takosjp/takosumi-mobile-kit/solid": fileURLToPath(
+            "@takosjp/mobile-kit/solid": fileURLToPath(
               new URL("src/solid.ts", mobileKitRoot),
             ),
-            "@takosjp/takosumi-mobile-kit": fileURLToPath(
+            "@takosjp/mobile-kit": fileURLToPath(
               new URL("src/index.ts", mobileKitRoot),
             ),
           },
@@ -38,10 +38,9 @@ export function createTauriMobileViteConfig(
     optimizeDeps: input.resolveMobileKitFromPackage
       ? {
           exclude: [
-            "@takosjp/takosumi-mobile-kit",
-            "@takosjp/takosumi-mobile-kit/solid",
-            "@takosjp/takosumi-mobile-kit/vite",
-            "takosumi-contract",
+            "@takosjp/mobile-kit",
+            "@takosjp/mobile-kit/solid",
+            "@takosjp/mobile-kit/vite",
           ],
         }
       : undefined,
