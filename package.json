@@ -1,0 +1,28 @@
+{
+  "name": "@takosjp/takosumi-mobile-kit",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./solid": "./src/solid.ts",
+    "./vite": "./src/vite.ts",
+    "./mobile-shell.css": "./src/mobile-shell.css"
+  },
+  "peerDependencies": {
+    "solid-js": "^1.9.0"
+  },
+  "dependencies": {
+    "takosumi-contract": "file:../contract"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test ../tests/mobile-kit/src"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "solid-js": "^1.9.13",
+    "typescript": "^5.7.0"
+  }
+}
