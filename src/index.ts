@@ -74,6 +74,23 @@ export {
   type TakosumiWellKnownDocument,
 } from "./contract/mobile-discovery.ts";
 export {
+  appendTakosumiAppHandoff,
+  createTakosumiAppConnectHref,
+  createTakosumiAppHandoffUrl,
+  isSafeLinkHref,
+  isTakosumiAppProductKey,
+  normalizeTakosumiAppHandoffHostUrl,
+  parseTakosumiAppProductKey,
+  parseTakosumiAppReturnUri,
+  requireTakosumiAppProductKey,
+  requireTakosumiAppReturnUri,
+  takosumiAppHandoffFromSearch,
+  type CreateTakosumiAppConnectHrefInput,
+  type CreateTakosumiAppHandoffUrlInput,
+  type TakosumiAppHandoff,
+  type TakosumiAppProductKey,
+} from "./contract/app-handoff.ts";
+export {
   createMobileApiClient,
   fetchHostNotificationPusherConfig,
   HOST_NOTIFICATION_PUSHER_CONFIG_DECODER,
