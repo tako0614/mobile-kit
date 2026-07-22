@@ -35,9 +35,16 @@ const androidRoot = path.join(process.cwd(), "src-tauri/gen/android");
 mkdirSync(path.join(androidRoot, "app"), { recursive: true });
 writeFileSync(path.join(androidRoot, "build.gradle.kts"), 'plugins {\\n    id("com.android.application") version "8.5.0" apply false\\n}\\n');
 writeFileSync(path.join(androidRoot, "app/build.gradle.kts"), 'plugins {\\n    id("com.android.application")\\n}\\n\\ndependencies {\\n}\\n');
+mkdirSync(path.join(androidRoot, "app/src/main"), { recursive: true });
+writeFileSync(path.join(androidRoot, "app/src/main/AndroidManifest.xml"), '<?xml version="1.0" encoding="utf-8"?>\\n<manifest xmlns:android="http://schemas.android.com/apk/res/android">\\n    <application android:label="@string/app_name">\\n    </application>\\n</manifest>\\n');
 `,
     );
     chmodSync(fakeBunx, 0o755);
+    mkdirSync(path.join(appDir, "src"), { recursive: true });
+    writeFileSync(
+      path.join(appDir, "src/product.ts"),
+      'export const productAdapter = { product: "takos" };\n',
+    );
 
     const result = spawnSync(
       "bun",
@@ -78,6 +85,24 @@ writeFileSync(path.join(androidRoot, "app/build.gradle.kts"), 'plugins {\\n    i
         "utf8",
       ),
     ).toContain("firebase-messaging");
+    const manifest = readFileSync(
+      path.join(
+        appDir,
+        "src-tauri/gen/android/app/src/main/AndroidManifest.xml",
+      ),
+      "utf8",
+    );
+    expect(manifest).toContain('android:allowBackup="false"');
+    expect(manifest).toContain('tools:replace="android:required"');
+    expect(
+      readFileSync(
+        path.join(
+          appDir,
+          "src-tauri/gen/android/app/src/main/res/xml/data_extraction_rules.xml",
+        ),
+        "utf8",
+      ),
+    ).toContain('<exclude domain="root" path="takos-mobile.hold" />');
     expect(result.stdout).toContain(
       "Tauri android project generated and integrated.",
     );

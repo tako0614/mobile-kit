@@ -39,12 +39,52 @@ export type {
 
 export { discoverHost } from "./discovery.ts";
 export {
+  decodeWire,
+  fetchOptionalWire,
+  fetchWire,
+  WireDecodeError,
+  type WireDecoder,
+} from "./wire.ts";
+export {
+  assertMobileHostWire,
+  checkMobileHostWire,
+  checkMobileWireDefectCorpus,
+  mobileWireBlocker,
+  mobileWireRequirementSummary,
+  type MobileWireDefectCase,
+  type MobileWireViolation,
+} from "./conformance.ts";
+export {
+  mobileProductWellKnownPath,
+  mobileWireRequirement,
+  HOST_CAPABILITIES_DECODER,
+  HOST_CAPABILITIES_PATH,
+  MOBILE_PRODUCT_WELL_KNOWN_DECODER,
+  MOBILE_PRODUCT_WELL_KNOWN_FIXTURES,
+  MOBILE_SIGNIN_REQUIREMENTS,
+  TAKOSUMI_WELL_KNOWN_DECODER,
+  TAKOSUMI_WELL_KNOWN_PATH,
+  type HostCapabilitiesDocument,
+  type MobileHostWireBundle,
+  type MobileHostWireFixture,
+  type MobileProductWellKnown,
+  type MobileWireBlocks,
+  type MobileWireRequirement,
+  type MobileWireRequirementId,
+  type TakosumiWellKnownDocument,
+} from "./contract/mobile-discovery.ts";
+export {
   createMobileApiClient,
+  fetchHostNotificationPusherConfig,
+  HOST_NOTIFICATION_PUSHER_CONFIG_DECODER,
   MobileApiError,
   NOTIFICATION_PUSHER_REGISTRATION_PATH,
   registerNotificationPusherWithHost,
+  resolveNotificationPusherConfigEndpoint,
   resolveNotificationPusherEndpoint,
+  resolveNotificationPusherGatewayUrl,
   unregisterNotificationPusherWithHost,
+  type HostNotificationPusherConfig,
   type MobileApiClient,
   type MobileHostNotificationPusherRegistrationInput,
   type MobileHostNotificationPusherUnregistrationInput,
@@ -85,6 +125,7 @@ export {
   exchangeOidcCode,
   fetchOidcMetadata,
   parseOidcCallback,
+  OIDC_DISCOVERY_DECODER,
 } from "./oidc.ts";
 export {
   beginMobileOidcSignIn,

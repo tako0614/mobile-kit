@@ -8,6 +8,9 @@ const doctorScript = fileURLToPath(
 const nativePushScript = fileURLToPath(
   new URL("./apply-tauri-mobile-push-native.mjs", import.meta.url),
 );
+const androidManifestScript = fileURLToPath(
+  new URL("./apply-tauri-mobile-android-manifest.mjs", import.meta.url),
+);
 
 const doctorArgs = process.argv.slice(2).includes("--strict-native-env")
   ? process.argv.slice(2)
@@ -28,7 +31,31 @@ const checks = [
       "--strict",
     ],
   },
+  {
+    // Without this, a shell whose generated project never had the manifest step
+    // applied still passes release:native-check and ships with Auto Backup on
+    // and the camera declared as a required feature.
+    label: "strict generated Android manifest hardening",
+    args: [
+      androidManifestScript,
+      "--product",
+      productArg(),
+      "--dry-run",
+      "--strict",
+    ],
+  },
 ];
+
+function productArg() {
+  const argv = process.argv.slice(2);
+  const index = argv.indexOf("--product");
+  const value = index >= 0 ? argv[index + 1] : undefined;
+  if (!value) {
+    console.error("check-tauri-mobile-release: --product is required");
+    process.exit(2);
+  }
+  return value;
+}
 
 const failures = [];
 

@@ -5,6 +5,7 @@ import {
   NOTIFICATION_PUSHER_REGISTRATION_PATH,
   registerNotificationPusherWithHost,
   resolveNotificationPusherEndpoint,
+  resolveNotificationPusherGatewayUrl,
   unregisterNotificationPusherWithHost,
   type MobileSession,
   type NotificationPusher,
@@ -68,11 +69,13 @@ test("registerNotificationPusherWithHost posts the product-neutral pusher", asyn
     fetch: collect(requests),
   });
 
-  expect(requests[0].url).toBe("https://host.example/custom/pushers");
-  expect(requests[0].method).toBe("POST");
-  expect(requests[0].headers.get("authorization")).toBe("Bearer access-1");
-  expect(requests[0].headers.get("content-type")).toBe("application/json");
-  expect(await requests[0].json()).toEqual({
+  // The runtime config lookup precedes the registration POST.
+  expect(requests[0].url).toBe("https://host.example/custom/pushers/config");
+  expect(requests[1].url).toBe("https://host.example/custom/pushers");
+  expect(requests[1].method).toBe("POST");
+  expect(requests[1].headers.get("authorization")).toBe("Bearer access-1");
+  expect(requests[1].headers.get("content-type")).toBe("application/json");
+  expect(await requests[1].json()).toEqual({
     product: "takos",
     scope: "account:user-1",
     pusher,
@@ -92,7 +95,7 @@ test("registerNotificationPusherWithHost accepts a same-origin advertised endpoi
     fetch: collect(requests),
   });
 
-  expect(requests[0].url).toBe(
+  expect(requests[1].url).toBe(
     "https://host.example/api/notifications/pushers",
   );
 });
@@ -148,6 +151,113 @@ test("notification pusher helper rejects insecure remote gateways before fetch",
       },
     }),
   ).rejects.toThrow("Notification pusher is invalid (pusher.data)");
+});
+
+test("the host-advertised gateway wins over the build-time gateway", async () => {
+  const requests: Request[] = [];
+
+  await registerNotificationPusherWithHost({
+    session: session(),
+    pusher,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      return request.url.endsWith("/config")
+        ? json({
+            gateway_url:
+              "https://gateway.selfhost.example/_matrix/push/v1/notify",
+            web_push_public_key: null,
+          })
+        : json({ ok: true });
+    },
+  });
+
+  const registered = (await requests[1].json()) as {
+    pusher: { data: { url: string } };
+  };
+  expect(registered.pusher.data.url).toBe(
+    "https://gateway.selfhost.example/_matrix/push/v1/notify",
+  );
+});
+
+test("the build-time gateway is used when the host advertises none", async () => {
+  const requests: Request[] = [];
+
+  await registerNotificationPusherWithHost({
+    session: session(),
+    pusher,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      return request.url.endsWith("/config")
+        ? json({ gateway_url: null, web_push_public_key: null })
+        : json({ ok: true });
+    },
+  });
+
+  const registered = (await requests[1].json()) as {
+    pusher: { data: { url: string } };
+  };
+  expect(registered.pusher.data.url).toBe(pusher.data.url);
+});
+
+test("a host without a config endpoint still registers the build-time gateway", async () => {
+  const requests: Request[] = [];
+
+  await registerNotificationPusherWithHost({
+    session: session(),
+    pusher,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      return request.url.endsWith("/config")
+        ? new Response("not found", { status: 404 })
+        : json({ ok: true });
+    },
+  });
+
+  const registered = (await requests[1].json()) as {
+    pusher: { data: { url: string } };
+  };
+  expect(registered.pusher.data.url).toBe(pusher.data.url);
+});
+
+test("resolveNotificationPusherGatewayUrl fails when nothing supplies a gateway", async () => {
+  await expect(
+    resolveNotificationPusherGatewayUrl({
+      session: session(),
+      fetch: async () => json({ gateway_url: null }),
+    }),
+  ).rejects.toThrow(
+    "This host does not advertise a notification push gateway.",
+  );
+});
+
+test("host rejection messages reach the caller instead of a bare status", async () => {
+  const client = createMobileApiClient({
+    session: session(),
+    fetch: async () =>
+      new Response(
+        JSON.stringify({
+          code: "BAD_REQUEST",
+          error: "pusher.data.url is not allowed by this server",
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+  });
+
+  try {
+    await client.json("/api/notifications/pushers", { method: "POST" });
+    throw new Error("expected request to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(MobileApiError);
+    expect((error as MobileApiError).detail).toBe(
+      "pusher.data.url is not allowed by this server",
+    );
+    expect((error as MobileApiError).message).toContain(
+      "pusher.data.url is not allowed by this server",
+    );
+  }
 });
 
 test("resolveNotificationPusherEndpoint falls back to the standard path", () => {

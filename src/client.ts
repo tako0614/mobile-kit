@@ -1098,85 +1098,86 @@ function createClientCopy(
   options: CreateMobileClientControllerOptions,
 ): Required<MobileClientCopy> {
   const hostNoun = options.adapter.hostNoun;
-  const homeLabel = options.homeLabel ?? "home";
+  const homeLabel = options.homeLabel ?? "ホーム";
+  // Defaults are Japanese to match the shell chrome this package already ships
+  // (`solid-shell.tsx` labels, aria-labels and onboarding copy). English-facing
+  // products override these through `copy`.
   return {
     initialStatus:
       options.copy?.initialStatus ??
-      `Enter a ${hostNoun} URL or connection payload.`,
-    checkingStatus: options.copy?.checkingStatus ?? `Checking ${hostNoun}...`,
-    discoveredStatus: options.copy?.discoveredStatus ?? `${hostNoun} found.`,
+      `${hostNoun}のURLまたは接続コードを入力してください。`,
+    checkingStatus: options.copy?.checkingStatus ?? `${hostNoun}を確認しています…`,
+    discoveredStatus: options.copy?.discoveredStatus ?? `${hostNoun}が見つかりました。`,
     connectFirstStatus:
-      options.copy?.connectFirstStatus ?? `Connect to a ${hostNoun} first.`,
+      options.copy?.connectFirstStatus ?? `先に${hostNoun}へ接続してください。`,
     preparingSignInStatus:
-      options.copy?.preparingSignInStatus ?? "Preparing sign-in...",
+      options.copy?.preparingSignInStatus ?? "サインインを準備しています…",
     openingSignInStatus:
-      options.copy?.openingSignInStatus ?? "Opening sign-in...",
-    signedInStatus: options.copy?.signedInStatus ?? "Signed in.",
-    signInFailedStatus: options.copy?.signInFailedStatus ?? "Sign-in failed.",
+      options.copy?.openingSignInStatus ?? "サインイン画面を開いています…",
+    signedInStatus: options.copy?.signedInStatus ?? "サインインしました。",
+    signInFailedStatus:
+      options.copy?.signInFailedStatus ?? "サインインに失敗しました。",
     sessionRestoredStatus:
-      options.copy?.sessionRestoredStatus ?? "Session restored.",
+      options.copy?.sessionRestoredStatus ?? "セッションを復元しました。",
     sessionLockedStatus:
       options.copy?.sessionLockedStatus ??
-      "Saved session is locked. Unlock to continue.",
+      "保存されたセッションはロックされています。解除して続けてください。",
     sessionUnlockingStatus:
-      options.copy?.sessionUnlockingStatus ?? "Unlocking session...",
+      options.copy?.sessionUnlockingStatus ?? "セッションを解除しています…",
     sessionUnlockedStatus:
-      options.copy?.sessionUnlockedStatus ?? "Session unlocked.",
+      options.copy?.sessionUnlockedStatus ?? "セッションを解除しました。",
     sessionUnlockUnavailableStatus:
       options.copy?.sessionUnlockUnavailableStatus ??
-      "Session unlock is not available on this device.",
+      "この端末ではセッションの解除を利用できません。",
     sessionUnlockFailedStatus:
-      options.copy?.sessionUnlockFailedStatus ?? "Session unlock was canceled.",
-    unlockSessionLabel: options.copy?.unlockSessionLabel ?? "Unlock session",
-    signedOutStatus: options.copy?.signedOutStatus ?? "Signed out.",
+      options.copy?.sessionUnlockFailedStatus ??
+      "セッションの解除をキャンセルしました。",
+    unlockSessionLabel: options.copy?.unlockSessionLabel ?? "セッションを解除",
+    signedOutStatus: options.copy?.signedOutStatus ?? "サインアウトしました。",
     qrFallbackStatus:
       options.copy?.qrFallbackStatus ??
-      "Paste the connection payload from your QR code.",
+      "QRコードの接続コードを貼り付けてください。",
     urlFallbackStatus:
-      options.copy?.urlFallbackStatus ?? `Enter the ${hostNoun} URL.`,
+      options.copy?.urlFallbackStatus ?? `${hostNoun}のURLを入力してください。`,
     homeLoadingStatus:
-      options.copy?.homeLoadingStatus ?? `Loading ${homeLabel}...`,
-    homeReadyStatus:
-      options.copy?.homeReadyStatus ?? `${capitalize(homeLabel)} ready.`,
+      options.copy?.homeLoadingStatus ?? `${homeLabel}を読み込んでいます…`,
+    homeReadyStatus: options.copy?.homeReadyStatus ?? `${homeLabel}を表示しました。`,
     homeFailedStatus:
-      options.copy?.homeFailedStatus ?? `${capitalize(homeLabel)} load failed.`,
+      options.copy?.homeFailedStatus ?? `${homeLabel}の読み込みに失敗しました。`,
     pushRegisteringStatus:
-      options.copy?.pushRegisteringStatus ??
-      "Registering push notifications...",
+      options.copy?.pushRegisteringStatus ?? "プッシュ通知を登録しています…",
     pushReadyStatus:
-      options.copy?.pushReadyStatus ?? "Push notifications ready.",
+      options.copy?.pushReadyStatus ?? "プッシュ通知を有効にしました。",
     pushUnavailableStatus:
       options.copy?.pushUnavailableStatus ??
-      "Push notifications are not available on this device.",
+      "この端末ではプッシュ通知を利用できません。",
     pushFailedStatus:
-      options.copy?.pushFailedStatus ??
-      "Push notification registration failed.",
+      options.copy?.pushFailedStatus ?? "プッシュ通知の登録に失敗しました。",
     pushTokenRefreshedStatus:
       options.copy?.pushTokenRefreshedStatus ??
-      "Push notification token refreshed.",
+      "プッシュ通知のトークンを更新しました。",
     pushNotificationReceivedStatus:
-      options.copy?.pushNotificationReceivedStatus ??
-      "Push notification received.",
+      options.copy?.pushNotificationReceivedStatus ?? "プッシュ通知を受信しました。",
     pushNotificationTappedStatus:
-      options.copy?.pushNotificationTappedStatus ?? "Push notification opened.",
+      options.copy?.pushNotificationTappedStatus ?? "プッシュ通知を開きました。",
     pushEventsFailedStatus:
       options.copy?.pushEventsFailedStatus ??
-      "Push notification events are unavailable.",
+      "プッシュ通知のイベントを利用できません。",
     routePendingStatus:
       options.copy?.routePendingStatus ??
-      "Sign in to open the requested route.",
+      "リクエストされた画面を開くにはサインインしてください。",
     routeOpenedStatus:
-      options.copy?.routeOpenedStatus ?? "Opened requested route.",
+      options.copy?.routeOpenedStatus ?? "リクエストされた画面を開きました。",
     routeNeedsSessionStatus:
       options.copy?.routeNeedsSessionStatus ??
-      "Sign in before opening this mobile route.",
+      "この画面を開く前にサインインしてください。",
     routeFailedStatus:
-      options.copy?.routeFailedStatus ?? "Mobile route open failed.",
-    knownHostsLabel: options.copy?.knownHostsLabel ?? "Recent hosts",
+      options.copy?.routeFailedStatus ?? "画面を開けませんでした。",
+    knownHostsLabel: options.copy?.knownHostsLabel ?? "最近の接続先",
     knownHostRemovedStatus:
-      options.copy?.knownHostRemovedStatus ?? "Recent host removed.",
+      options.copy?.knownHostRemovedStatus ?? "接続先の履歴を削除しました。",
     knownHostsClearedStatus:
-      options.copy?.knownHostsClearedStatus ?? "Recent hosts cleared.",
+      options.copy?.knownHostsClearedStatus ?? "接続先の履歴を消去しました。",
   };
 }
 
@@ -1227,8 +1228,4 @@ function resolveSessionUnlockPrompt(
       allowDeviceCredential: true,
     }
   );
-}
-
-function capitalize(value: string): string {
-  return value ? value[0]!.toUpperCase() + value.slice(1) : value;
 }

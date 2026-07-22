@@ -28,8 +28,23 @@ test("createTauriMobileViteConfig builds shared mobile dev-server wiring", () =>
     fs: {
       allow: ["/repo/"],
     },
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
   });
   expect(config.clearScreen).toBe(false);
+});
+
+test("createTauriMobileViteConfig keeps the watcher out of the Rust target dir", () => {
+  // `src-tauri/target/` contains build-script symlink loops (libsodium autoconf
+  // temp dirs) that crash the watcher with ELOOP if it walks in.
+  const config = createTauriMobileViteConfig({
+    devPort: 1430,
+    importMetaUrl: "file:///repo/yurucommu-mobile/vite.config.ts",
+    env: {},
+  });
+
+  expect(config.server.watch.ignored).toContain("**/src-tauri/**");
 });
 
 test("createTauriMobileViteConfig keeps desktop dev server local by default", () => {

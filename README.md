@@ -164,6 +164,55 @@ provide a product-owned native adapter, delivery backend, token lifecycle, and
 physical-device evidence. The shared typed adapter is an integration seam, not
 readiness evidence.
 
+## Host Wire Conformance
+
+Host discovery is a contract between a producer (the product worker that serves
+`/.well-known/<product>`, `/.well-known/takosumi`, `/v1/capabilities`) and this
+consumer. Both sides used to test only their own half, so two disagreements
+shipped green: a worker that baked in a product token the shell never asks for
+(every connect failed), and a host document with no `oidcClientId` whose
+`issuer` pointed at a host that serves no OIDC discovery (every sign-in failed
+before the first network call).
+
+The wire surface is therefore one module — `src/contract/mobile-discovery.ts` —
+holding the document types, the decoders, the requirements, and the fixtures:
+
+- **Decoders are values.** `fetchWire(fetcher, url, decoder)` has no way to be
+  told the response shape as a type argument, so a host document cannot be read
+  without importing the contract that defines it. There is no `fetchJson<T>()`.
+- **Requirements are data.** `MOBILE_SIGNIN_REQUIREMENTS` evaluates the whole
+  document bundle, because the known defects are cross-document (the product
+  key vs. the path it was served at; the product `issuer` vs. the capabilities'
+  `identity.oidc_issuer`). `discoverHost` throws on `connect` blockers and
+  carries `sign-in` blockers on `HostDiscovery.wireViolations`, so a shell
+  reports which host document is wrong instead of a generic client error.
+- **Fixtures are shared.** Consumer tests build host responses from
+  `MOBILE_PRODUCT_WELL_KNOWN_FIXTURES` instead of hand-written literals, so a
+  test cannot pin a shape the requirements reject.
+- **Known defects are shipped as a corpus.** `MOBILE_WIRE_DEFECT_CORPUS` records
+  the real non-conformant producer documents and the requirements each must
+  violate, so the checks stay proven rather than merely present.
+
+A producer repo runs the same comparison against its own real output:
+
+```ts
+import { assertMobileHostWire } from "@takosjp/mobile-kit";
+
+// productKey is the token this host bakes into its own well-known document.
+assertMobileHostWire({
+  hostUrl: "https://host.example",
+  expectedProduct: productKey,
+  productWellKnown: createProductWellKnown("https://host.example"),
+  capabilities: createProductCapabilities("https://host.example"),
+});
+```
+
+This module is the vendored mirror of the discovery half of the wire contract
+owned by `takosumi-contract`; the ecosystem root wire-contract gate verifies
+that the mirror only narrows the owning contract and exercises the shared
+requirements, fixtures, and producer/consumer product-token agreement. Change
+the owning wire surface first, then update the mirror and its fixtures together.
+
 ## Checks
 
 ```sh
@@ -174,7 +223,7 @@ bun run test
 Product shells call the shared doctor from their own mobile package directory:
 
 ```sh
-bun ../../takosumi/mobile-kit/scripts/check-tauri-mobile.mjs \
+bun ../mobile-kit/scripts/check-tauri-mobile.mjs \
   --product notes-app \
   --scheme notesapp \
   --product-name Notes \

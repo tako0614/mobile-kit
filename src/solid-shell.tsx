@@ -53,12 +53,22 @@ export interface MobileShellCopy<Home> {
   readonly summary: string;
   readonly connectLabel: string;
   readonly onboardingTitle?: string;
+  /**
+   * Product logo asset. Preferred over `brandMark`: it lets a shell show the
+   * same mark its web app ships instead of a letter in a generic blob.
+   */
+  readonly brandLogoUrl?: string;
+  /** Fallback glyph drawn in the shell blob when no logo asset is supplied. */
   readonly brandMark?: string;
+  /** Logo asset for the Host Center choice, in place of an initial letter. */
+  readonly hostCenterIconUrl?: string;
   readonly takosumiActionLabel?: string;
   readonly takosumiActionDescription?: string;
   readonly manualActionLabel?: string;
   readonly manualActionDescription?: string;
   readonly manualBackLabel?: string;
+  /** Lead sentence under the manual connect step header. */
+  readonly manualStepLead?: string;
   readonly qrActionLabel?: string;
   readonly knownHostsLabel?: string;
   readonly knownHostsClearLabel?: string;
@@ -127,6 +137,11 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
   const [setupMode, setSetupMode] = createSignal<"choices" | "manual">(
     "choices",
   );
+  // Drives which way a step slides in, so going deeper and coming back read as
+  // opposite moves instead of the same fade.
+  const [stepDirection, setStepDirection] = createSignal<"forward" | "back">(
+    "forward",
+  );
   let inputRef: HTMLInputElement | undefined;
   let unsubscribe: (() => void) | undefined;
 
@@ -139,6 +154,17 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
     unsubscribe?.();
     controller.stop();
   });
+
+  function openManualStep() {
+    setStepDirection("forward");
+    setSetupMode("manual");
+    queueMicrotask(() => inputRef?.focus());
+  }
+
+  function closeManualStep() {
+    setStepDirection("back");
+    setSetupMode("choices");
+  }
 
   async function selectAction(
     actionId: (typeof controller.actions)[number]["id"],
@@ -229,21 +255,36 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       <Show
         when={!state().session && !state().discovery && !state().lockedSession}
       >
-        <section class="mobile-onboarding">
-          <div class="onboarding-brand" aria-hidden="true">
-            <span>
-              {props.copy.brandMark ?? props.adapter.appName.slice(0, 1)}
-            </span>
-          </div>
-          <div class="onboarding-copy">
-            <p class="eyebrow">{props.copy.eyebrow ?? "Mobile client"}</p>
-            <h1>{props.adapter.appName}</h1>
-            <h2>{props.copy.onboardingTitle ?? "つながる場所を選ぼう"}</h2>
-            <p class="summary">{props.copy.summary}</p>
-          </div>
-
+        <section class="mobile-onboarding" data-step={setupMode()}>
           <Show when={setupMode() === "choices"}>
-            <section class="setup-choices" aria-label="接続方法">
+            <div class="onboarding-step" data-direction={stepDirection()}>
+              <Show
+                when={props.copy.brandLogoUrl}
+                fallback={
+                  <div class="onboarding-brand" aria-hidden="true">
+                    <span>
+                      {props.copy.brandMark ??
+                        props.adapter.appName.slice(0, 1)}
+                    </span>
+                  </div>
+                }
+              >
+                {(logoUrl) => (
+                  <img
+                    class="onboarding-brand-logo"
+                    src={logoUrl()}
+                    alt=""
+                    aria-hidden="true"
+                  />
+                )}
+              </Show>
+              <div class="onboarding-copy">
+                <p class="eyebrow">{props.copy.eyebrow ?? "Mobile client"}</p>
+                <h1>{props.adapter.appName}</h1>
+                <h2>{props.copy.onboardingTitle ?? "つながる場所を選ぼう"}</h2>
+                <p class="summary">{props.copy.summary}</p>
+              </div>
+              <section class="setup-choices" aria-label="接続方法">
               <Show when={hostCenterAction()}>
                 {(action) => (
                   <button
@@ -251,7 +292,25 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                     class="setup-choice setup-choice-primary"
                     onClick={() => void selectAction(action().id)}
                   >
-                    <span class="setup-choice-icon">T</span>
+                    <Show
+                      when={props.copy.hostCenterIconUrl}
+                      fallback={
+                        <span class="setup-choice-icon">
+                          {(props.adapter.hostCenterLabel ?? "Takosumi").slice(
+                            0,
+                            1,
+                          )}
+                        </span>
+                      }
+                    >
+                      {(iconUrl) => (
+                        <img
+                          class="setup-choice-icon setup-choice-icon-logo"
+                          src={iconUrl()}
+                          alt=""
+                        />
+                      )}
+                    </Show>
                     <span class="setup-choice-copy">
                       <strong>
                         {props.copy.takosumiActionLabel ?? "Takosumiで始める"}
@@ -268,10 +327,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
               <button
                 type="button"
                 class="setup-choice"
-                onClick={() => {
-                  setSetupMode("manual");
-                  queueMicrotask(() => inputRef?.focus());
-                }}
+                onClick={() => openManualStep()}
               >
                 <span class="setup-choice-icon setup-choice-icon-manual">
                   ⌁
@@ -287,67 +343,74 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                 </span>
                 <span class="setup-choice-arrow">›</span>
               </button>
-            </section>
+              </section>
+            </div>
           </Show>
 
           <Show when={setupMode() === "manual"}>
-            <form
-              class="connect-panel manual-connect-panel"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void controller.connect();
-              }}
-            >
-              <button
-                type="button"
-                class="manual-back"
-                onClick={() => setSetupMode("choices")}
-              >
-                ‹ {props.copy.manualBackLabel ?? "接続方法に戻る"}
-              </button>
-              <div class="manual-heading">
-                <h2>
-                  {props.copy.manualActionLabel ?? "サーバーを自分で入力"}
-                </h2>
-                <p>接続先のURLを入力してください。</p>
-              </div>
-              <label for="connect-input">{props.copy.connectLabel}</label>
-              <div class="connect-input-row">
-                <input
-                  id="connect-input"
-                  name="mobile-connect"
-                  ref={inputRef}
-                  inputMode="url"
-                  autocapitalize="none"
-                  autocomplete="url"
-                  value={state().connectInput}
-                  placeholder={props.adapter.urlPlaceholder}
-                  onInput={(event) =>
-                    controller.setConnectInput(event.currentTarget.value)
-                  }
-                />
-                <Show
-                  when={Boolean(
-                    qrAction() && props.nativeBridge.scanConnectionPayload,
-                  )}
+            <div class="onboarding-step" data-direction={stepDirection()}>
+              <header class="step-header">
+                <button
+                  type="button"
+                  class="step-back"
+                  aria-label={props.copy.manualBackLabel ?? "接続方法に戻る"}
+                  onClick={() => closeManualStep()}
                 >
-                  <button
-                    type="button"
-                    class="scan-button"
-                    aria-label={props.copy.qrActionLabel ?? "QRを読み取る"}
-                    onClick={() => void selectAction("qr")}
+                  <span aria-hidden="true">‹</span>
+                </button>
+                <h1>
+                  {props.copy.manualActionLabel ?? "サーバーを自分で入力"}
+                </h1>
+              </header>
+              <form
+                class="connect-panel manual-connect-panel"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void controller.connect();
+                }}
+              >
+                <p class="step-lead">
+                  {props.copy.manualStepLead ??
+                    "接続先のURLを入力してください。"}
+                </p>
+                <label for="connect-input">{props.copy.connectLabel}</label>
+                <div class="connect-input-row">
+                  <input
+                    id="connect-input"
+                    name="mobile-connect"
+                    ref={inputRef}
+                    inputMode="url"
+                    autocapitalize="none"
+                    autocomplete="url"
+                    value={state().connectInput}
+                    placeholder={props.adapter.urlPlaceholder}
+                    onInput={(event) =>
+                      controller.setConnectInput(event.currentTarget.value)
+                    }
+                  />
+                  <Show
+                    when={Boolean(
+                      qrAction() && props.nativeBridge.scanConnectionPayload,
+                    )}
                   >
-                    QR
-                  </button>
-                </Show>
-              </div>
-              <button type="submit" class="primary connect-submit">
-                {props.adapter.primaryActionLabel}
-              </button>
-              <p class="status" aria-live="polite">
-                {state().status}
-              </p>
-            </form>
+                    <button
+                      type="button"
+                      class="scan-button"
+                      aria-label={props.copy.qrActionLabel ?? "QRを読み取る"}
+                      onClick={() => void selectAction("qr")}
+                    >
+                      <QrGlyph />
+                    </button>
+                  </Show>
+                </div>
+                <button type="submit" class="primary connect-submit">
+                  {props.adapter.primaryActionLabel}
+                </button>
+                <p class="status" aria-live="polite">
+                  {state().status}
+                </p>
+              </form>
+            </div>
           </Show>
         </section>
       </Show>
@@ -599,4 +662,20 @@ function resolveHostActionPath<Home>(
   context: MobileShellHostActionContext<Home>,
 ): string | undefined {
   return typeof action.path === "function" ? action.path(context) : action.path;
+}
+
+/** Scan affordance drawn as a QR reticle instead of the letters "QR". */
+function QrGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M4 9V5.6A1.6 1.6 0 0 1 5.6 4H9M15 4h3.4A1.6 1.6 0 0 1 20 5.6V9M20 15v3.4a1.6 1.6 0 0 1-1.6 1.6H15M9 20H5.6A1.6 1.6 0 0 1 4 18.4V15"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+      />
+      <rect x="8" y="8" width="8" height="8" rx="1.4" fill="currentColor" />
+    </svg>
+  );
 }

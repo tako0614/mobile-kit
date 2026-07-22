@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -53,7 +54,43 @@ if (applyCode !== 0) {
   process.exit(applyCode);
 }
 
+if (platform === "android") {
+  console.log("\n==> Apply Android manifest hardening");
+  const manifestScript = fileURLToPath(
+    new URL("./apply-tauri-mobile-android-manifest.mjs", import.meta.url),
+  );
+  const manifestCode = await run("bun", [
+    manifestScript,
+    "--app-dir",
+    appDir,
+    "--product",
+    requireProductKey(appDir),
+  ]);
+  if (manifestCode !== 0) {
+    console.error(
+      `Applying Android manifest hardening failed with exit code ${manifestCode}.`,
+    );
+    process.exit(manifestCode);
+  }
+}
+
 console.log(`\nTauri ${platform} project generated and integrated.`);
+
+// The manifest hardening needs the product key that names the shell's secure
+// store files; src/product.ts is where every shell already declares it.
+function requireProductKey(directory) {
+  const productPath = path.join(directory, "src/product.ts");
+  const match = existsSync(productPath)
+    ? // Anchored so `hostCenterProduct:` / `discoveryProduct:` cannot match; those
+      // would silently yield another product's secure-store exclusion paths.
+      /(?:^|[\s{,])product:\s*"([^"]+)"/m.exec(readFileSync(productPath, "utf8"))
+    : undefined;
+  if (!match) {
+    console.error(`Could not read the product key from ${productPath}`);
+    process.exit(1);
+  }
+  return match[1];
+}
 
 function run(command, commandArgs) {
   return new Promise((resolveExit) => {

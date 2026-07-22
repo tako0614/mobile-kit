@@ -1,17 +1,21 @@
-import type {
-  FetchLike,
-  HostCapabilities,
-  HostDiscovery,
-  MobileProductKind,
-  ProductWellKnown,
-  TakosumiWellKnown,
-} from "./types.ts";
-import { parseMobileProductKind } from "./handoff.ts";
+import type { FetchLike, HostDiscovery, MobileProductKind } from "./types.ts";
+import {
+  HOST_CAPABILITIES_DECODER,
+  HOST_CAPABILITIES_PATH,
+  MOBILE_PRODUCT_WELL_KNOWN_DECODER,
+  TAKOSUMI_WELL_KNOWN_DECODER,
+  TAKOSUMI_WELL_KNOWN_PATH,
+  detectBundleProduct,
+  mobileProductWellKnownPath,
+  readOidcClientId,
+  resolveAuthMethods,
+  resolveOidcIssuer,
+  type MobileHostWireBundle,
+} from "./contract/mobile-discovery.ts";
+import { checkMobileHostWire } from "./conformance.ts";
+import { fetchOptionalWire } from "./wire.ts";
 import { hostEndpoint, normalizeHostUrl } from "./url.ts";
 import { requireMobileProductKey } from "./product-key.ts";
-
-const takosumiWellKnownPath = "/.well-known/takosumi";
-const capabilitiesPath = "/v1/capabilities";
 
 export async function discoverHost(input: {
   readonly hostUrl: string;
@@ -24,119 +28,65 @@ export async function discoverHost(input: {
     ? requireMobileProductKey(input.expectedProduct, "Expected product")
     : undefined;
   const productPath = expectedProduct
-    ? `/.well-known/${expectedProduct}`
+    ? mobileProductWellKnownPath(expectedProduct)
     : undefined;
 
   const [takosumi, capabilities, product] = await Promise.all([
-    fetchOptionalJson<TakosumiWellKnown>(
+    fetchOptionalWire(
       fetcher,
-      hostEndpoint(hostUrl, takosumiWellKnownPath),
+      hostEndpoint(hostUrl, TAKOSUMI_WELL_KNOWN_PATH),
+      TAKOSUMI_WELL_KNOWN_DECODER,
     ),
-    fetchOptionalJson<HostCapabilities>(
+    fetchOptionalWire(
       fetcher,
-      hostEndpoint(hostUrl, capabilitiesPath),
+      hostEndpoint(hostUrl, HOST_CAPABILITIES_PATH),
+      HOST_CAPABILITIES_DECODER,
     ),
     productPath
-      ? fetchOptionalJson<ProductWellKnown>(
+      ? fetchOptionalWire(
           fetcher,
           hostEndpoint(hostUrl, productPath),
+          MOBILE_PRODUCT_WELL_KNOWN_DECODER,
         )
       : undefined,
   ]);
 
-  const detectedProduct = detectProduct(takosumi, capabilities, product);
-  if (
-    expectedProduct &&
-    detectedProduct &&
-    detectedProduct !== expectedProduct
-  ) {
-    throw new Error(`Host is ${detectedProduct}, not ${expectedProduct}.`);
-  }
+  const bundle: MobileHostWireBundle = {
+    hostUrl,
+    expectedProduct,
+    productWellKnown: product,
+    takosumiWellKnown: takosumi,
+    capabilities,
+  };
 
-  const oidcIssuer =
-    product?.issuer ??
-    readIdentityIssuer(capabilities) ??
-    readTakosumiIssuer(takosumi);
+  // The wire requirements are the contract, not a client-side opinion: a
+  // producer-side gate runs the same list over the same bundle shape. Connect
+  // blockers throw here; sign-in blockers travel on the discovery so the shell
+  // can show the host and report exactly which document is wrong.
+  const wireViolations = checkMobileHostWire(bundle);
+  const connectBlocker = wireViolations.find(
+    (violation) => violation.blocks === "connect",
+  );
+  if (connectBlocker) throw new Error(connectBlocker.detail);
+
+  const oidcIssuer = resolveOidcIssuer(bundle);
   const normalizedOidcIssuer = oidcIssuer
     ? normalizeHostUrl(oidcIssuer)
     : undefined;
-  const authMethods = {
-    oidc: product?.auth?.oidc ?? Boolean(normalizedOidcIssuer),
-    password: product?.auth?.password ?? false,
-  };
-  if (!authMethods.oidc && !authMethods.password) {
-    throw new Error("Host does not advertise an OIDC issuer.");
-  }
 
   return {
     hostUrl,
     expectedProduct,
-    detectedProduct,
+    detectedProduct: detectBundleProduct(bundle),
     takosumi,
     capabilities,
     product,
     oidcIssuer: normalizedOidcIssuer,
-    oidcClientId: readProductOidcClientId(product),
+    oidcClientId: readOidcClientId(product),
     oidcDiscoveryUrl: normalizedOidcIssuer
       ? hostEndpoint(normalizedOidcIssuer, "/.well-known/openid-configuration")
       : undefined,
-    authMethods,
+    authMethods: resolveAuthMethods(bundle),
+    wireViolations,
   };
-}
-
-function readProductOidcClientId(
-  product: ProductWellKnown | undefined,
-): string | undefined {
-  const value = product?.oidcClientId;
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-
-async function fetchOptionalJson<T>(
-  fetcher: FetchLike,
-  url: string,
-): Promise<T | undefined> {
-  const response = await fetcher(url, {
-    headers: { accept: "application/json" },
-  });
-  if (response.status === 404) return undefined;
-  if (!response.ok) {
-    throw new Error(`Discovery request failed: ${response.status} ${url}`);
-  }
-  return (await response.json()) as T;
-}
-
-function detectProduct(
-  takosumi: TakosumiWellKnown | undefined,
-  capabilities: HostCapabilities | undefined,
-  product: ProductWellKnown | undefined,
-): MobileProductKind | undefined {
-  return (
-    parseMobileProductKind(product?.product) ??
-    parseMobileProductKind(takosumi?.product) ??
-    parseMobileProductKind(
-      typeof capabilities?.product === "string"
-        ? capabilities.product
-        : capabilities?.product?.kind,
-    )
-  );
-}
-
-function readIdentityIssuer(
-  capabilities: HostCapabilities | undefined,
-): string | undefined {
-  return typeof capabilities?.identity?.issuer === "string"
-    ? capabilities.identity.issuer
-    : undefined;
-}
-
-function readTakosumiIssuer(
-  takosumi: TakosumiWellKnown | undefined,
-): string | undefined {
-  return typeof takosumi?.issuer === "string"
-    ? takosumi.issuer
-    : takosumi?.endpoints && typeof takosumi.endpoints.oidc_issuer === "string"
-      ? takosumi.endpoints.oidc_issuer
-      : undefined;
 }

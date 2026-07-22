@@ -6,6 +6,11 @@ import type {
   MobilePushClientRegistration,
   MobilePushProvider as ContractMobilePushProvider,
 } from "./contract/mobile.ts";
+import type {
+  HostCapabilitiesDocument,
+  TakosumiWellKnownDocument,
+} from "./contract/mobile-discovery.ts";
+import type { MobileWireViolation } from "./conformance.ts";
 
 export type MobileHostableProductKind = ContractMobileHostableProductKind;
 export type MobileProductKind = ContractMobileProductKind;
@@ -72,29 +77,11 @@ export interface MobileKnownHost {
   readonly label?: string;
 }
 
-export interface TakosumiWellKnown {
-  readonly api_versions?: readonly string[];
-  readonly issuer?: string;
-  readonly capabilitiesUrl?: string;
-  readonly product?: string;
-  readonly endpoints?: {
-    readonly api?: string;
-    readonly capabilities?: string;
-    readonly oidc_issuer?: string;
-  };
-  readonly [key: string]: unknown;
-}
+// Host document shapes live in the wire contract next to the decoders that
+// accept them; these aliases keep the historical mobile-kit names.
+export type TakosumiWellKnown = TakosumiWellKnownDocument;
 
-export interface HostCapabilities {
-  readonly product?: string | { readonly kind?: string };
-  readonly identity?: {
-    readonly oidc_issuer?: boolean;
-    readonly issuer?: string;
-  };
-  readonly resources?: Record<string, unknown>;
-  readonly extensions?: readonly string[];
-  readonly [key: string]: unknown;
-}
+export type HostCapabilities = HostCapabilitiesDocument;
 
 export interface HostDiscovery {
   readonly hostUrl: string;
@@ -110,6 +97,12 @@ export interface HostDiscovery {
     readonly oidc: boolean;
     readonly password: boolean;
   };
+  /**
+   * Wire requirements this host violates. Connect blockers never reach here
+   * (discovery throws), so these are the sign-in blockers a shell must report
+   * against the producing document rather than as a client error.
+   */
+  readonly wireViolations?: readonly MobileWireViolation[];
 }
 
 export interface OidcMetadata {

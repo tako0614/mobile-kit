@@ -58,6 +58,13 @@ export function createTauriMobileViteConfig(
       fs: {
         allow: [fileURLToPath(new URL("../..", input.importMetaUrl))],
       },
+      // Rust build scripts (libsodium-sys-stable の autoconf 等) が
+      // `src-tauri/target/` に symlink loop を含む一時ファイルを作るため、
+      // watcher が walk すると ELOOP で dev server ごと落ちる。 Rust 側は
+      // cargo が watch するので Vite は `src-tauri` を丸ごと見ない。
+      watch: {
+        ignored: ["**/src-tauri/**"],
+      },
     },
     clearScreen: false,
   };

@@ -1,90 +1,91 @@
 import { expect, test } from "bun:test";
-import { discoverHost, type FetchLike } from "../../src/index.ts";
+import {
+  discoverHost,
+  mobileProductWellKnownPath,
+  HOST_CAPABILITIES_PATH,
+  MOBILE_PRODUCT_WELL_KNOWN_FIXTURES,
+  TAKOSUMI_WELL_KNOWN_PATH,
+  type FetchLike,
+  type MobileHostWireBundle,
+} from "../../src/index.ts";
 
-test("discoverHost reads Takosumi, capabilities, product, and OIDC issuer", async () => {
-  const fetcher: FetchLike = async (input) => {
+// Host documents come from the shipped wire fixtures rather than from literals
+// written here: a hand-written fixture is how this suite previously stayed
+// green while pinning a document shape no producer emits.
+function fixtureBundle(id: string): MobileHostWireBundle {
+  const fixture = MOBILE_PRODUCT_WELL_KNOWN_FIXTURES.find(
+    (candidate) => candidate.id === id,
+  );
+  if (!fixture) throw new Error(`Missing wire fixture: ${id}`);
+  return fixture.bundle;
+}
+
+function bundleFetch(bundle: MobileHostWireBundle): FetchLike {
+  return async (input) => {
     const url = String(input);
-    if (url.endsWith("/.well-known/takosumi")) {
-      return json({ issuer: "https://issuer.example", product: "takos" });
+    if (
+      bundle.expectedProduct &&
+      bundle.productWellKnown &&
+      url.endsWith(mobileProductWellKnownPath(bundle.expectedProduct))
+    ) {
+      return json(bundle.productWellKnown);
     }
-    if (url.endsWith("/v1/capabilities")) {
-      return json({ identity: { oidc_issuer: true } });
+    if (bundle.takosumiWellKnown && url.endsWith(TAKOSUMI_WELL_KNOWN_PATH)) {
+      return json(bundle.takosumiWellKnown);
     }
-    if (url.endsWith("/.well-known/takos")) {
-      return json({
-        product: "takos",
-        name: "Takos",
-        oidcClientId: "takos-mobile-host-example",
-        endpoints: {
-          notificationPushers: "https://host.example/api/notifications/pushers",
-        },
-      });
+    if (bundle.capabilities && url.endsWith(HOST_CAPABILITIES_PATH)) {
+      return json(bundle.capabilities);
     }
     return new Response("", { status: 404 });
   };
+}
+
+test("discoverHost reads product, capabilities, and the upstream OIDC issuer", async () => {
+  const bundle = fixtureBundle("external-issuer-oidc-host");
 
   const discovery = await discoverHost({
-    hostUrl: "https://host.example/path",
-    expectedProduct: "takos",
-    fetch: fetcher,
+    hostUrl: "https://app.example/path",
+    expectedProduct: "example-app",
+    fetch: bundleFetch(bundle),
   });
 
-  expect(discovery.hostUrl).toBe("https://host.example");
-  expect(discovery.detectedProduct).toBe("takos");
-  expect(discovery.oidcIssuer).toBe("https://issuer.example");
-  expect(discovery.oidcClientId).toBe("takos-mobile-host-example");
+  expect(discovery.hostUrl).toBe("https://app.example");
+  expect(discovery.detectedProduct).toBe("example-app");
+  // This host is an OIDC client: the issuer is the external accounts plane,
+  // never the host origin itself.
+  expect(discovery.oidcIssuer).toBe("https://accounts.example");
+  expect(discovery.oidcClientId).toBe("example-app-mobile");
   expect(discovery.oidcDiscoveryUrl).toBe(
-    "https://issuer.example/.well-known/openid-configuration",
+    "https://accounts.example/.well-known/openid-configuration",
   );
   expect(discovery.product?.endpoints?.notificationPushers).toBe(
-    "https://host.example/api/notifications/pushers",
+    "https://app.example/api/notifications/pushers",
   );
+  expect(discovery.wireViolations).toEqual([]);
 });
 
-test("discoverHost reads Yurucommu product discovery", async () => {
-  const fetcher: FetchLike = async (input) => {
-    const url = String(input);
-    if (url.endsWith("/.well-known/yurucommu")) {
-      return json({
-        product: "yurucommu",
-        name: "Yurucommu",
-        issuer: "https://accounts.example",
-        apiBaseUrl: "https://social.example",
-        endpoints: {
-          currentUser: "https://social.example/api/auth/me",
-          mobilePushRegistrations:
-            "https://social.example/api/mobile/push-registrations",
-        },
-      });
-    }
-    return new Response("", { status: 404 });
-  };
+test("discoverHost reads product discovery from a shared-engine host", async () => {
+  const bundle = fixtureBundle("shared-engine-host");
 
   const discovery = await discoverHost({
     hostUrl: "https://social.example",
-    expectedProduct: "yurucommu",
-    fetch: fetcher,
+    expectedProduct: "example-social",
+    fetch: bundleFetch(bundle),
   });
 
-  expect(discovery.detectedProduct).toBe("yurucommu");
+  expect(discovery.detectedProduct).toBe("example-social");
   expect(discovery.oidcIssuer).toBe("https://accounts.example");
-  expect(discovery.product?.endpoints?.mobilePushRegistrations).toBe(
-    "https://social.example/api/mobile/push-registrations",
+  expect(discovery.product?.endpoints?.notificationPushers).toBe(
+    "https://social.example/api/notifications/pushers",
   );
 });
 
 test("discoverHost accepts a password-only direct host without OIDC", async () => {
+  const bundle = fixtureBundle("password-only-host");
   const discovery = await discoverHost({
     hostUrl: "https://social.example",
-    expectedProduct: "yurucommu",
-    fetch: async (input) =>
-      String(input).endsWith("/.well-known/yurucommu")
-        ? json({
-            product: "yurucommu",
-            auth: { oidc: false, password: true },
-            endpoints: { mobilePasswordLogin: "/api/auth/mobile/login" },
-          })
-        : new Response("", { status: 404 }),
+    expectedProduct: "example-social",
+    fetch: bundleFetch(bundle),
   });
   expect(discovery.oidcIssuer).toBeUndefined();
   expect(discovery.authMethods).toEqual({ oidc: false, password: true });

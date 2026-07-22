@@ -18,6 +18,10 @@ import {
   parseOidcCallback,
 } from "./oidc.ts";
 import { isMobileProductKind } from "./contract/mobile.ts";
+import {
+  mobileWireBlocker,
+  mobileWireRequirementSummary,
+} from "./conformance.ts";
 import { requireMobileProductKey } from "./product-key.ts";
 
 const MOBILE_AUTH_REQUEST_TTL_MS = 10 * 60 * 1000;
@@ -577,10 +581,18 @@ function isProductEndpointsRecord(
 
 function mobileClientId(discovery: HostDiscovery): string {
   const clientId = discovery.oidcClientId?.trim();
-  if (!clientId) {
-    throw new Error("Host does not advertise a mobile OIDC client id.");
-  }
-  return clientId;
+  if (clientId) return clientId;
+  // Report the wire requirement the producing host violates, so the shell and
+  // the producer-side gate name the same defect in the same words.
+  throw new Error(
+    mobileWireBlocker(
+      discovery.wireViolations,
+      "oidc-host-advertises-a-mobile-client-id",
+    ) ??
+      `Host does not advertise a mobile OIDC client id. ${mobileWireRequirementSummary(
+        "oidc-host-advertises-a-mobile-client-id",
+      )}`,
+  );
 }
 
 function requireSessionMobileClientId(session: MobileSession): string {

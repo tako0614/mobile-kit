@@ -45,7 +45,7 @@ test("mobile client controller connects, signs in, and loads home", async () => 
   await controller.connect();
 
   expect(controller.getState().discovery?.hostUrl).toBe("https://host.example");
-  expect(controller.getState().status).toBe("Takos host found.");
+  expect(controller.getState().status).toBe("Takos hostが見つかりました。");
 
   await controller.startSignIn();
   const authorizeUrl = bridge.opened.at(-1);
@@ -67,7 +67,7 @@ test("mobile client controller connects, signs in, and loads home", async () => 
   expect(controller.getState().home).toEqual({
     title: "https://host.example",
   });
-  expect(controller.getState().homeStatus).toBe("Workspace ready.");
+  expect(controller.getState().homeStatus).toBe("workspaceを表示しました。");
   expect(controller.getState().knownHosts[0]).toMatchObject({
     hostUrl: "https://host.example",
     product: "takos",
@@ -152,12 +152,12 @@ test("mobile client controller forgets and clears recent hosts", async () => {
       label: undefined,
     },
   ]);
-  expect(controller.getState().status).toBe("Recent host removed.");
+  expect(controller.getState().status).toBe("接続先の履歴を削除しました。");
 
   await controller.clearKnownHosts();
 
   expect(controller.getState().knownHosts).toEqual([]);
-  expect(controller.getState().status).toBe("Recent hosts cleared.");
+  expect(controller.getState().status).toBe("接続先の履歴を消去しました。");
   expect(
     await bridge.storage?.get(mobileKnownHostsStorageKey(adapter)),
   ).toBeUndefined();
@@ -188,7 +188,7 @@ test("mobile client controller restores session on start", async () => {
 
   expect(controller.getState().session?.accessToken).toBe("stored-token");
   expect(controller.getState().home).toEqual({ token: "stored-token" });
-  expect(controller.getState().status).toBe("Session restored.");
+  expect(controller.getState().status).toBe("セッションを復元しました。");
 });
 
 test("mobile client does not restore stale home state after sign out", async () => {
@@ -225,7 +225,7 @@ test("mobile client does not restore stale home state after sign out", async () 
   expect(controller.getState().session).toBeUndefined();
   expect(controller.getState().home).toBeUndefined();
   expect(controller.getState().homeLoading).toBe(false);
-  expect(controller.getState().status).toBe("Signed out.");
+  expect(controller.getState().status).toBe("サインアウトしました。");
 });
 
 test("mobile client revokes an advertised host bearer session on sign out", async () => {
@@ -292,7 +292,7 @@ test("mobile client clears its local session when host revocation fails", async 
   await controller.signOut();
 
   expect(controller.getState().session).toBeUndefined();
-  expect(controller.getState().status).toBe("Signed out.");
+  expect(controller.getState().status).toBe("サインアウトしました。");
   expect(
     await bridge.storage?.get(mobileSessionStorageKey(adapter)),
   ).toBeUndefined();
@@ -404,7 +404,7 @@ test("mobile client controller opens mobile route launch payloads on the current
 
   expect(bridge.opened).toEqual(["https://host.example/chat"]);
   expect(controller.getState().pendingRoute).toBeUndefined();
-  expect(controller.getState().status).toBe("Opened requested route.");
+  expect(controller.getState().status).toBe("リクエストされた画面を開きました。");
 });
 
 test("mobile client controller keeps mobile routes pending until sign-in", async () => {
@@ -427,7 +427,7 @@ test("mobile client controller keeps mobile routes pending until sign-in", async
     product: undefined,
   });
   expect(controller.getState().status).toBe(
-    "Sign in to open the requested route.",
+    "リクエストされた画面を開くにはサインインしてください。",
   );
 
   await controller.startSignIn();
@@ -440,7 +440,7 @@ test("mobile client controller keeps mobile routes pending until sign-in", async
   expect(controller.getState().session?.accessToken).toBe("access-1");
   expect(controller.getState().pendingRoute).toBeUndefined();
   expect(bridge.opened.at(-1)).toBe("https://host.example/apps");
-  expect(controller.getState().status).toBe("Opened requested route.");
+  expect(controller.getState().status).toBe("リクエストされた画面を開きました。");
 });
 
 test("mobile client controller treats hosted route URLs as route handoffs", async () => {
@@ -461,7 +461,7 @@ test("mobile client controller treats hosted route URLs as route handoffs", asyn
     product: undefined,
   });
   expect(controller.getState().status).toBe(
-    "Sign in to open the requested route.",
+    "リクエストされた画面を開くにはサインインしてください。",
   );
 
   await controller.startSignIn();
@@ -474,7 +474,7 @@ test("mobile client controller treats hosted route URLs as route handoffs", asyn
   expect(controller.getState().session?.accessToken).toBe("access-1");
   expect(controller.getState().pendingRoute).toBeUndefined();
   expect(bridge.opened.at(-1)).toBe("https://host.example/chat?thread=1");
-  expect(controller.getState().status).toBe("Opened requested route.");
+  expect(controller.getState().status).toBe("リクエストされた画面を開きました。");
 });
 
 test("mobile client controller gates restored sessions behind biometric unlock", async () => {
@@ -521,7 +521,7 @@ test("mobile client controller gates restored sessions behind biometric unlock",
   expect(controller.getState().lockedSession?.accessToken).toBe("stored-token");
   expect(controller.getState().home).toBeUndefined();
   expect(controller.getState().status).toBe(
-    "Saved session is locked. Unlock to continue.",
+    "保存されたセッションはロックされています。解除して続けてください。",
   );
 
   await controller.unlockSession();
@@ -694,7 +694,7 @@ test("mobile client controller keeps Host Center setup handoff state", async () 
     setupTicket: "ticket-1",
   });
   expect(controller.getState().status).toBe(
-    "Takos host found. Host Center handoff received.",
+    "Takos hostが見つかりました。 Host Center handoff received.",
   );
 });
 
@@ -774,7 +774,7 @@ test("mobile client controller registers push notifications through product call
     token: "push-token",
     environment: "test",
   });
-  expect(controller.getState().pushStatus).toBe("Push notifications ready.");
+  expect(controller.getState().pushStatus).toBe("プッシュ通知を有効にしました。");
   expect(controller.getState().pushLoading).toBe(false);
   expect(registered).toEqual([
     {
@@ -874,7 +874,7 @@ test("mobile client controller handles push token refresh and notification event
     environment: "test",
   });
   expect(controller.getState().pushStatus).toBe(
-    "Push notification token refreshed.",
+    "プッシュ通知のトークンを更新しました。",
   );
   expect(registered).toHaveLength(2);
   expect(unregistered).toEqual([
@@ -909,7 +909,7 @@ test("mobile client controller handles push token refresh and notification event
     body: "Open chat",
     data: { path: "/chat" },
   });
-  expect(controller.getState().pushStatus).toBe("Push notification opened.");
+  expect(controller.getState().pushStatus).toBe("プッシュ通知を開きました。");
   expect(notifications).toEqual([
     {
       session: controller.getState().session,
@@ -1096,7 +1096,7 @@ test("mobile client controller keeps sign-in usable when push is unavailable", a
   expect(controller.getState().session?.accessToken).toBe("access-1");
   expect(controller.getState().pushRegistration).toBeUndefined();
   expect(controller.getState().pushStatus).toBe(
-    "Push notifications are not available on this device.",
+    "この端末ではプッシュ通知を利用できません。",
   );
   expect(controller.getState().pushLoading).toBe(false);
 });
@@ -1175,7 +1175,7 @@ test("mobile client controller asks UI to focus when sign-in needs a host", asyn
   const result = await controller.startSignIn();
 
   expect(result.focusInput).toBe(true);
-  expect(controller.getState().status).toBe("Connect to a Takos host first.");
+  expect(controller.getState().status).toBe("先にTakos hostへ接続してください。");
 });
 
 function fixtureFetch(): FetchLike {

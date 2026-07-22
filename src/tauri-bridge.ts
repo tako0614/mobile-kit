@@ -128,11 +128,20 @@ export interface TauriBarcodeScannerAdapter {
   readonly scanConnectionPayload: () => Promise<string | undefined>;
 }
 
+export type TauriCameraPermissionState =
+  | "granted"
+  | "denied"
+  | "prompt"
+  | "prompt-with-rationale";
+
 export interface TauriBarcodeScannerModule<FormatValue = unknown> {
   readonly scan: (options?: {
     readonly formats?: FormatValue[];
   }) => Promise<{ readonly content: string }>;
   readonly qrCodeFormat: FormatValue;
+  /** Required for scanning to work: see `ensureCameraPermission`. */
+  readonly checkPermissions?: () => Promise<TauriCameraPermissionState>;
+  readonly requestPermissions?: () => Promise<TauriCameraPermissionState>;
 }
 
 export interface TauriPushNotificationsAdapter {
@@ -806,6 +815,11 @@ function createQrScannerAdapter<BarcodeFormat>(
 ): TauriBarcodeScannerAdapter {
   return {
     async scanConnectionPayload() {
+      // The plugin does not request the camera permission for us: `scan`
+      // throws "No permission to use camera. Did you request it yet?" whenever
+      // the OS grant is missing. Ask first, and treat a refusal as a cancelled
+      // scan rather than surfacing that developer-facing error to the user.
+      if (!(await ensureCameraPermission(barcodeScanner))) return undefined;
       return (
         await barcodeScanner.scan({
           formats: [barcodeScanner.qrCodeFormat],
@@ -813,6 +827,21 @@ function createQrScannerAdapter<BarcodeFormat>(
       ).content;
     },
   };
+}
+
+async function ensureCameraPermission<BarcodeFormat>(
+  barcodeScanner: TauriBarcodeScannerModule<BarcodeFormat>,
+): Promise<boolean> {
+  // Older shells may not supply the permission functions; leave their
+  // behaviour untouched and let the scan attempt speak for itself.
+  if (!barcodeScanner.checkPermissions || !barcodeScanner.requestPermissions) {
+    return true;
+  }
+  const current = await barcodeScanner.checkPermissions();
+  if (current === "granted") return true;
+  // "denied" here means permanently denied, so re-prompting cannot succeed.
+  if (current === "denied") return false;
+  return (await barcodeScanner.requestPermissions()) === "granted";
 }
 
 async function loadStrongholdStore(

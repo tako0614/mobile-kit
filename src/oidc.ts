@@ -8,6 +8,35 @@ import type {
   PkcePair,
 } from "./types.ts";
 import { hostEndpoint, normalizeHostUrl, requireSecureWebUrl } from "./url.ts";
+import { decodeWire, type WireDecoder } from "./wire.ts";
+
+/**
+ * RFC 8414 discovery document, decoded through a value instead of an `as`
+ * cast: the shell must not assert what an issuer emits, and a mistyped field
+ * has to name the document and the issuer URL that produced it.
+ */
+export const OIDC_DISCOVERY_DECODER: WireDecoder<Partial<OidcMetadata>> = {
+  document: "OIDC discovery",
+  decode(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error("document must be a JSON object");
+    }
+    const record = value as Record<string, unknown>;
+    for (const field of [
+      "issuer",
+      "authorization_endpoint",
+      "token_endpoint",
+      "revocation_endpoint",
+      "introspection_endpoint",
+    ] as const) {
+      const entry = record[field];
+      if (entry !== undefined && typeof entry !== "string") {
+        throw new Error(`${field} must be a string`);
+      }
+    }
+    return record as Partial<OidcMetadata>;
+  },
+};
 
 const verifierAlphabet =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
@@ -37,14 +66,21 @@ export async function fetchOidcMetadata(input: {
 }): Promise<OidcMetadata> {
   const fetcher = input.fetch ?? globalThis.fetch.bind(globalThis);
   const expectedIssuer = normalizeOidcIssuer(input.issuer, "OIDC issuer");
-  const response = await fetcher(
-    hostEndpoint(expectedIssuer, "/.well-known/openid-configuration"),
-    { headers: { accept: "application/json" } },
+  const discoveryUrl = hostEndpoint(
+    expectedIssuer,
+    "/.well-known/openid-configuration",
   );
+  const response = await fetcher(discoveryUrl, {
+    headers: { accept: "application/json" },
+  });
   if (!response.ok) {
     throw new Error(`OIDC discovery failed: ${response.status}`);
   }
-  const value = (await response.json()) as Partial<OidcMetadata>;
+  const value = decodeWire(
+    OIDC_DISCOVERY_DECODER,
+    await response.json(),
+    discoveryUrl,
+  );
   const metadataIssuer = normalizeOidcIssuer(
     value.issuer,
     "OIDC metadata issuer",

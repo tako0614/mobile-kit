@@ -43,12 +43,103 @@ button:disabled {
 
 .mobile-onboarding {
   display: grid;
+  /*
+   * `dvh` so the on-screen keyboard shrinking the viewport is respected, and
+   * `safe` centring so a step taller than the viewport grows downward instead
+   * of overflowing upward behind the status bar (which is unreachable and
+   * unscrollable).
+   */
   min-height: calc(
-    100vh - max(24px, env(safe-area-inset-top)) -
+    100dvh - max(24px, env(safe-area-inset-top)) -
       max(28px, env(safe-area-inset-bottom))
   );
-  align-content: center;
+  align-content: safe center;
   gap: 24px;
+}
+
+/* A step is a screen: it owns the viewport and animates in as its own move. */
+.onboarding-step {
+  display: grid;
+  gap: 24px;
+  align-content: safe center;
+  animation: onboarding-step-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/*
+ * A form step anchors to the top: centring it leaves the submit button under
+ * the on-screen keyboard and a dead band of empty space above the header.
+ */
+.mobile-onboarding[data-step="manual"],
+.mobile-onboarding[data-step="manual"] .onboarding-step {
+  align-content: start;
+}
+
+.onboarding-step[data-direction="back"] {
+  animation-name: onboarding-step-in-back;
+}
+
+@keyframes onboarding-step-in {
+  from {
+    opacity: 0;
+    transform: translate3d(28px, 0, 0);
+  }
+}
+
+@keyframes onboarding-step-in-back {
+  from {
+    opacity: 0;
+    transform: translate3d(-28px, 0, 0);
+  }
+}
+
+/* Step header: a real back affordance in a title row, not an inline text link. */
+.step-header {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-bottom: -4px;
+}
+
+.step-header h1 {
+  font-size: 1.32rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.step-back {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid var(--shell-border);
+  border-radius: 50%;
+  padding: 0;
+  background: var(--shell-card);
+  color: var(--shell-text);
+  font-size: 1.45rem;
+  line-height: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.step-back:active {
+  transform: scale(0.94);
+}
+
+.step-lead {
+  margin: 0;
+  color: var(--shell-muted);
+  font-size: 0.88rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-step {
+    animation: none;
+  }
+
+  .step-back:active {
+    transform: none;
+  }
 }
 
 .onboarding-brand {
@@ -81,6 +172,19 @@ button:disabled {
 .onboarding-brand span {
   position: relative;
   z-index: 1;
+}
+
+/*
+ * Product logo asset. Shown instead of the generic accent blob so a shell
+ * carries the same mark as its web app. The asset owns its own shape and
+ * background, so no blob fill or tail is drawn behind it.
+ */
+.onboarding-brand-logo {
+  width: 76px;
+  height: 76px;
+  justify-self: center;
+  border-radius: 22px;
+  object-fit: cover;
 }
 
 .onboarding-copy {
@@ -153,6 +257,12 @@ button:disabled {
   font-weight: 900;
 }
 
+/* Host Center logo asset: the mark supplies its own fill, so drop the tile. */
+.setup-choice-icon-logo {
+  background: none;
+  object-fit: contain;
+}
+
 .setup-choice-icon-manual {
   background: var(--shell-soft);
   color: var(--accent);
@@ -182,34 +292,17 @@ button:disabled {
   font-weight: 300;
 }
 
-.manual-connect-panel {
-  border-radius: 26px;
-  padding: 20px;
-  box-shadow: 0 12px 36px rgb(44 32 29 / 7%);
-}
-
-.manual-back {
-  justify-self: start;
+/*
+ * On its own step the connect form is the screen, not a card floating on one,
+ * so it drops the panel border/fill it inherits from `.connect-panel`. The
+ * compound selector is required: the `.connect-panel` rule that sets those is
+ * declared later in this file and would otherwise win on source order.
+ */
+.connect-panel.manual-connect-panel {
   border: 0;
-  padding: 2px 0;
-  background: transparent;
-  color: var(--accent);
-  font-size: 0.82rem;
-  font-weight: 750;
-}
-
-.manual-heading {
-  display: grid;
-  gap: 4px;
-}
-
-.manual-heading h2 {
-  font-size: 1.15rem;
-}
-
-.manual-heading p {
-  color: var(--shell-muted);
-  font-size: 0.82rem;
+  padding: 0;
+  background: none;
+  gap: 14px;
 }
 
 .connect-input-row {
@@ -224,13 +317,19 @@ button:disabled {
 }
 
 .scan-button {
-  min-width: 48px;
+  display: grid;
+  width: 52px;
+  place-items: center;
   border: 1px solid var(--shell-control-border);
   border-radius: 14px;
+  padding: 0;
   background: var(--shell-soft);
   color: var(--accent);
-  font-size: 0.76rem;
-  font-weight: 850;
+}
+
+.scan-button svg {
+  width: 24px;
+  height: 24px;
 }
 
 .connect-submit {
