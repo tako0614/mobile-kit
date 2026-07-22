@@ -1,0 +1,8 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: mobile-kit
+Upstream-Contact: Takos Project
+Source: https://github.com/tako0614/mobile-kit
+
+Files: *
+Copyright: 2026 Takos Project
+License: MIT
