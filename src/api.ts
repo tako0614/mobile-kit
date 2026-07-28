@@ -12,7 +12,16 @@ export { NOTIFICATION_PUSHER_REGISTRATION_PATH };
 
 export interface MobileApiClient {
   readonly session: MobileSession;
+  /**
+   * Legacy unchecked JSON transport. New response-bearing routes should use
+   * `wire` so producer data is validated before it enters application code.
+   */
   readonly json: <T = unknown>(path: string, init?: RequestInit) => Promise<T>;
+  readonly wire: <T>(
+    path: string,
+    decoder: WireDecoder<T>,
+    init?: RequestInit,
+  ) => Promise<T>;
 }
 
 export class MobileApiError extends Error {
@@ -54,28 +63,45 @@ export function createMobileApiClient(input: {
   readonly fetch?: FetchLike;
 }): MobileApiClient {
   const fetcher = input.fetch ?? globalThis.fetch.bind(globalThis);
+  const requestJson = async (
+    path: string,
+    init: RequestInit = {},
+  ): Promise<unknown> => {
+    const response = await fetcher(
+      hostEndpoint(input.session.hostUrl, path),
+      {
+        ...init,
+        headers: {
+          accept: "application/json",
+          authorization: `${input.session.tokenType} ${input.session.accessToken}`,
+          ...init.headers,
+        },
+      },
+    );
+    if (!response.ok) {
+      throw new MobileApiError(
+        response.status,
+        path,
+        await readErrorDetail(response),
+      );
+    }
+    return await response.json();
+  };
   return {
     session: input.session,
     async json<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
-      const response = await fetcher(
+      return (await requestJson(path, init)) as T;
+    },
+    async wire<T>(
+      path: string,
+      decoder: WireDecoder<T>,
+      init: RequestInit = {},
+    ): Promise<T> {
+      return decodeWire(
+        decoder,
+        await requestJson(path, init),
         hostEndpoint(input.session.hostUrl, path),
-        {
-          ...init,
-          headers: {
-            accept: "application/json",
-            authorization: `${input.session.tokenType} ${input.session.accessToken}`,
-            ...init.headers,
-          },
-        },
       );
-      if (!response.ok) {
-        throw new MobileApiError(
-          response.status,
-          path,
-          await readErrorDetail(response),
-        );
-      }
-      return (await response.json()) as T;
     },
   };
 }

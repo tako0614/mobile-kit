@@ -36,3 +36,12 @@ test("mobile preview primitives expose the shared shell class contract", () => {
   expect(css).toContain(".preview-section-heading");
   expect(css).toContain(".preview-section-actions");
 });
+
+test("mobile shell hides unavailable host actions instead of rendering an empty landmark", () => {
+  const source = readKit("src/solid-shell.tsx");
+
+  expect(source).toContain(
+    "<Show when={availableHostActions().length > 0}>",
+  );
+  expect(source).toContain("<For each={availableHostActions()}>");
+});

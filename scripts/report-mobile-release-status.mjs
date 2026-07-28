@@ -4,17 +4,29 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { inspectMobileReleaseVersions } from "./mobile-release-versions.mjs";
 import { validateMobileReleaseEvidence } from "./mobile-release-evidence-validation.mjs";
+import { inspectMobileReleaseIdentity } from "./mobile-release-identity.mjs";
+import { validateMobileReleaseAttestation } from "./mobile-release-attestation.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const appDir = path.resolve(args.appDir ?? process.cwd());
-const product = requireArg(args.product, "--product");
-const productName = requireArg(args.productName, "--product-name");
-const bundleId = requireArg(args.bundleId, "--bundle-id");
+const requestedProduct = requireArg(args.product, "--product");
+const requestedProductName = requireArg(args.productName, "--product-name");
+const requestedBundleId = requireArg(args.bundleId, "--bundle-id");
+const identity = inspectMobileReleaseIdentity(appDir);
+const product = identity.product ?? requestedProduct;
+const productName = identity.productName ?? requestedProductName;
+const bundleId = identity.bundleId ?? requestedBundleId;
 const evidenceFile = path.resolve(
   appDir,
   args.file ??
     process.env.MOBILE_RELEASE_EVIDENCE_FILE ??
     "release/mobile-release-evidence.json",
+);
+const attestationFile = path.resolve(
+  appDir,
+  args.attestationFile ??
+    process.env.MOBILE_RELEASE_ATTESTATION_FILE ??
+    "release/mobile-release-attestation.json",
 );
 const jsonOutput = Boolean(args.json);
 const failOnBlockers = Boolean(args.failOnBlockers);
@@ -30,6 +42,7 @@ const facts = {
   productName,
   bundleId,
   evidenceFile,
+  attestationFile,
 };
 
 const REPO_ACTION = {
@@ -49,10 +62,18 @@ const STORE_EVIDENCE_ACTION = {
   owner: "store-release-operator",
 };
 
-const tauriConfig = readJson(
-  path.join(appDir, "src-tauri/tauri.conf.json"),
-  REPO_ACTION,
-);
+for (const issue of identity.issues) {
+  blocker(
+    issue.id,
+    "Mobile release identity cannot be derived from product config.",
+    issue.detail,
+    "Restore src/product.ts and src-tauri/tauri.conf.json as release identity authorities.",
+    REPO_ACTION,
+  );
+}
+checkRequestedIdentity();
+
+const tauriConfig = identity.tauriConfig;
 checkTauriConfig(tauriConfig);
 checkReleaseVersionSources();
 if (requireSecureKeystore) checkSecureKeystoreImplementation();
@@ -130,6 +151,36 @@ function checkTauriConfig(config) {
       "Tauri release version is not semver-like.",
       `Found ${version}.`,
       "Use a semver-like release version.",
+    );
+  }
+}
+
+function checkRequestedIdentity() {
+  if (requestedProduct !== product) {
+    blocker(
+      "identity.cli_product_mismatch",
+      "CLI product does not match src/product.ts.",
+      `Expected configured ${product}, received ${requestedProduct}.`,
+      "Remove stale release arguments and use the product adapter key.",
+      REPO_ACTION,
+    );
+  }
+  if (requestedProductName !== productName) {
+    blocker(
+      "tauri.product_name_mismatch",
+      "CLI product name does not match tauri.conf productName.",
+      `Expected configured ${productName}, received ${requestedProductName}.`,
+      "Remove stale release arguments and use tauri.conf productName.",
+      REPO_ACTION,
+    );
+  }
+  if (requestedBundleId !== bundleId) {
+    blocker(
+      "tauri.bundle_id_mismatch",
+      "CLI bundle id does not match tauri.conf identifier.",
+      `Expected configured ${bundleId}, received ${requestedBundleId}.`,
+      "Remove stale release arguments and use tauri.conf identifier.",
+      REPO_ACTION,
     );
   }
 }
@@ -598,6 +649,7 @@ function checkEvidenceFile() {
   }
   const evidence = readJson(evidenceFile, STORE_EVIDENCE_ACTION);
   if (!evidence) return;
+  const evidenceBytes = readFileSync(evidenceFile);
   const validation = validateMobileReleaseEvidence({
     evidence,
     product,
@@ -607,10 +659,48 @@ function checkEvidenceFile() {
   });
   facts.evidenceSchema = evidence.schema;
   facts.evidenceValid = validation.valid;
+  facts.evidenceState = "declared";
   for (const issue of validation.issues) {
     blocker(
       issue.id,
       "Release evidence is incomplete or invalid.",
+      issue.message,
+      issue.action,
+      STORE_EVIDENCE_ACTION,
+    );
+  }
+  checkAttestation(evidenceBytes);
+}
+
+function checkAttestation(evidenceBytes) {
+  facts.attestationFile = relative(attestationFile);
+  if (!existsSync(attestationFile)) {
+    facts.attestationState = "declared";
+    blocker(
+      "attestation.file_missing",
+      "Release evidence is declared but has not been independently verified.",
+      `${relative(attestationFile)} does not exist.`,
+      "Verify the exact evidence file and create a digest-bound takos.mobile-release-attestation.v1 sidecar.",
+      STORE_EVIDENCE_ACTION,
+    );
+    return;
+  }
+  const attestation = readJson(attestationFile, STORE_EVIDENCE_ACTION);
+  if (!attestation) return;
+  const validation = validateMobileReleaseAttestation({
+    attestation,
+    evidenceBytes,
+    product,
+    productName,
+    bundleId,
+    releaseVersion: facts.tauriVersion,
+  });
+  facts.attestationState = validation.valid ? "verified" : "declared";
+  facts.attestationSchema = attestation.schema;
+  for (const issue of validation.issues) {
+    blocker(
+      issue.id,
+      "Release attestation is incomplete or invalid.",
       issue.message,
       issue.action,
       STORE_EVIDENCE_ACTION,

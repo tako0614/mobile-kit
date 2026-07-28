@@ -54,17 +54,18 @@ test("browser native bridge opens external URLs through the browser", async () =
   expect(opened).toEqual(["https://app.takosumi.com/new?product=takos"]);
 });
 
-test("browser native bridge exposes local storage fallback", async () => {
+test("browser native bridge exposes local storage only as ordinary storage", async () => {
   const bridge = createBrowserNativeBridge({
     window: fakeWindow("https://mobile.example", undefined, memoryStorage()),
   });
 
-  expect(bridge.secureStore?.kind).toBe("browser-local");
+  expect(bridge.secureStore).toBeUndefined();
+  expect(bridge.capabilities.secureStorage).toBe(false);
   expect(bridge.storage?.kind).toBe("browser-local");
-  await bridge.secureStore?.set("k", "v");
-  expect(await bridge.secureStore?.get("k")).toBe("v");
-  await bridge.secureStore?.delete("k");
-  expect(await bridge.secureStore?.get("k")).toBeUndefined();
+  await bridge.storage?.set("k", "v");
+  expect(await bridge.storage?.get("k")).toBe("v");
+  await bridge.storage?.delete("k");
+  expect(await bridge.storage?.get("k")).toBeUndefined();
 });
 
 function fakeWindow(

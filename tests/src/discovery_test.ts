@@ -80,6 +80,31 @@ test("discoverHost reads product discovery from a shared-engine host", async () 
   );
 });
 
+test("discoverHost preserves advertised product capability tokens", async () => {
+  const fixture = fixtureBundle("shared-engine-host");
+  const bundle: MobileHostWireBundle = {
+    ...fixture,
+    productWellKnown: {
+      ...fixture.productWellKnown,
+      capabilities: [
+        "api.social.v1",
+        "client.example-social.feed.v1",
+      ],
+    },
+  };
+
+  const discovery = await discoverHost({
+    hostUrl: "https://social.example",
+    expectedProduct: "example-social",
+    fetch: bundleFetch(bundle),
+  });
+
+  expect(discovery.product?.capabilities).toEqual([
+    "api.social.v1",
+    "client.example-social.feed.v1",
+  ]);
+});
+
 test("discoverHost accepts a password-only direct host without OIDC", async () => {
   const bundle = fixtureBundle("password-only-host");
   const discovery = await discoverHost({

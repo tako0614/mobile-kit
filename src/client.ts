@@ -15,6 +15,7 @@ import type {
 } from "./types.ts";
 import {
   beginMobileOidcSignIn,
+  clearMobileCredentials,
   clearMobileSession,
   completeMobileOidcSignIn,
   ensureFreshMobileSession,
@@ -39,8 +40,12 @@ import {
   createMobileReturnUri,
   type FirstRunAction,
 } from "./shell.ts";
-import { mobileErrorMessage } from "./error.ts";
-import { normalizeHostUrl, openMobileHostRoute } from "./url.ts";
+import { isMobileAbortError, mobileErrorMessage } from "./error.ts";
+import {
+  normalizeHostUrl,
+  openMobileHostRoute,
+  type MobileHostRouteHandoff,
+} from "./url.ts";
 
 export interface MobileClientState<Home = unknown> {
   readonly connectInput: string;
@@ -127,6 +132,7 @@ export interface CreateMobileClientControllerOptions<Home = unknown> {
   readonly handlePushNotification?: (
     input: MobilePushNotificationCallbackInput,
   ) => Promise<void> | void;
+  readonly openHostRoute?: MobileHostRouteHandoff;
   readonly sessionUnlock?: MobileSessionUnlockOptions;
   readonly copy?: MobileClientCopy;
   readonly homeLabel?: string;
@@ -188,6 +194,8 @@ export function createMobileClientController<Home = unknown>(
   let sessionLifecycleEpoch = 0;
   let sessionStorageQueue: Promise<void> = Promise.resolve();
   let pushOperationQueue: Promise<void> = Promise.resolve();
+  let connectionEpoch = 0;
+  let connectionAbortController: AbortController | undefined;
   let started = false;
 
   function publish(next: Partial<MobileClientState<Home>>) {
@@ -579,13 +587,14 @@ export function createMobileClientController<Home = unknown>(
     const current = state.session;
     if (current && routeMatchesSession(route, current)) {
       try {
-        await openMobileHostRoute(options.nativeBridge, current, route.path);
+        await openMobileHostRoute(options.openHostRoute, current, route.path);
         publish({
           pendingRoute: undefined,
           status: copy.routeOpenedStatus,
         });
       } catch (error) {
         publish({
+          pendingRoute: route,
           status: mobileErrorMessage(error, copy.routeFailedStatus),
         });
       }
@@ -668,6 +677,10 @@ export function createMobileClientController<Home = unknown>(
   }
 
   async function connectToInput(input: string, preservePendingRoute = false) {
+    const connectEpoch = ++connectionEpoch;
+    connectionAbortController?.abort();
+    const abortController = new AbortController();
+    connectionAbortController = abortController;
     publish({
       status: copy.checkingStatus,
       connectPayload: undefined,
@@ -697,21 +710,39 @@ export function createMobileClientController<Home = unknown>(
             ? undefined
             : (options.adapter.discoveryProduct ?? options.adapter.product),
         fetch: options.fetch,
+        signal: abortController.signal,
       });
+      if (connectEpoch !== connectionEpoch) return;
+      requireHostCapabilities(
+        discovery,
+        options.adapter.requiredHostCapabilities,
+      );
       const knownHosts = await rememberKnownHost(discovery);
+      if (connectEpoch !== connectionEpoch) return;
       publish({
         connectPayload: payload,
         discovery,
         knownHosts,
         status: payload.setupTicket
-          ? `${copy.discoveredStatus} Host Center handoff received.`
+          ? `${copy.discoveredStatus} Unverified setup reference received.`
           : copy.discoveredStatus,
       });
     } catch (error) {
+      if (
+        connectEpoch !== connectionEpoch ||
+        isMobileAbortError(error) ||
+        abortController.signal.aborted
+      ) {
+        return;
+      }
       publish({
         connectPayload: undefined,
         status: mobileErrorMessage(error, "Host connection failed."),
       });
+    } finally {
+      if (connectionAbortController === abortController) {
+        connectionAbortController = undefined;
+      }
     }
   }
 
@@ -734,41 +765,56 @@ export function createMobileClientController<Home = unknown>(
       if (started) return;
       started = true;
       const startEpoch = sessionLifecycleEpoch;
-      if (options.nativeBridge.onLaunchPayload) {
-        launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
-          (payload) => {
-            void controller.handleLaunchPayload(payload);
-          },
-        );
-      }
-
-      publish({ knownHosts: await loadKnownHosts() });
-
-      const existingSession = await loadMobileSession({
-        adapter: options.adapter,
-        nativeBridge: options.nativeBridge,
-      });
-      if (startEpoch !== sessionLifecycleEpoch) return;
-      if (existingSession) {
-        if (shouldLockRestoredSession(options, existingSession)) {
-          publish({
-            lockedSession: existingSession,
-            status: copy.sessionLockedStatus,
-          });
-        } else {
-          await activateSession(
-            existingSession,
-            copy.sessionRestoredStatus,
-            startEpoch,
+      try {
+        if (options.nativeBridge.onLaunchPayload) {
+          launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
+            (payload) => {
+              void controller.handleLaunchPayload(payload);
+            },
           );
         }
-      }
 
-      if (startEpoch !== sessionLifecycleEpoch && !state.session) return;
-      const payload = await options.nativeBridge.getLaunchPayload();
-      if (payload) await controller.handleLaunchPayload(payload);
+        publish({ knownHosts: await loadKnownHosts() });
+
+        const existingSession = await loadMobileSession({
+          adapter: options.adapter,
+          nativeBridge: options.nativeBridge,
+        });
+        if (startEpoch !== sessionLifecycleEpoch) return;
+        if (existingSession) {
+          if (shouldLockRestoredSession(options, existingSession)) {
+            publish({
+              lockedSession: existingSession,
+              status: copy.sessionLockedStatus,
+            });
+          } else {
+            await activateSession(
+              existingSession,
+              copy.sessionRestoredStatus,
+              startEpoch,
+            );
+          }
+        }
+
+        if (startEpoch !== sessionLifecycleEpoch && !state.session) return;
+        const payload = await options.nativeBridge.getLaunchPayload();
+        if (payload) await controller.handleLaunchPayload(payload);
+      } catch (error) {
+        if (startEpoch === sessionLifecycleEpoch) {
+          try {
+            launchPayloadUnlisten?.();
+          } finally {
+            launchPayloadUnlisten = undefined;
+            started = false;
+          }
+        }
+        throw error;
+      }
     },
     stop() {
+      connectionEpoch += 1;
+      connectionAbortController?.abort();
+      connectionAbortController = undefined;
       invalidateSessionLifecycle();
       launchPayloadUnlisten?.();
       launchPayloadUnlisten = undefined;
@@ -994,6 +1040,9 @@ export function createMobileClientController<Home = unknown>(
     async signOut() {
       const currentSession = state.session;
       const currentPushRegistration = state.pushRegistration;
+      connectionEpoch += 1;
+      connectionAbortController?.abort();
+      connectionAbortController = undefined;
       invalidateSessionLifecycle();
       publish({
         connectPayload: undefined,
@@ -1028,7 +1077,7 @@ export function createMobileClientController<Home = unknown>(
         ]);
       });
       await enqueueSessionStorageOperation(async () => {
-        await clearMobileSession({
+        await clearMobileCredentials({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
         });
@@ -1092,6 +1141,38 @@ function normalizeOidcScopes(scopes: readonly string[] | undefined) {
     .flatMap((scope) => scope.trim().split(/\s+/u))
     .filter(Boolean);
   return normalized.length > 0 ? [...new Set(normalized)].join(" ") : undefined;
+}
+
+function requireHostCapabilities(
+  discovery: HostDiscovery,
+  requiredCapabilities: readonly string[] | undefined,
+): void {
+  if (!requiredCapabilities?.length) return;
+  if (requiredCapabilities.length > 128) {
+    throw new Error("App requires too many host capability tokens.");
+  }
+  const required = new Set<string>();
+  for (const token of requiredCapabilities) {
+    if (
+      token.length < 1 ||
+      token.length > 128 ||
+      token.trim() !== token ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(token)
+    ) {
+      throw new Error(`Invalid required host capability token: ${token}`);
+    }
+    if (required.has(token)) {
+      throw new Error(`Duplicate required host capability token: ${token}`);
+    }
+    required.add(token);
+  }
+  const advertised = new Set(discovery.product?.capabilities ?? []);
+  const missing = [...required].filter((token) => !advertised.has(token));
+  if (missing.length > 0) {
+    throw new Error(
+      `Host is missing required capabilities: ${missing.join(", ")}.`,
+    );
+  }
 }
 
 function createClientCopy(

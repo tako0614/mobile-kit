@@ -21,6 +21,7 @@ export async function discoverHost(input: {
   readonly hostUrl: string;
   readonly expectedProduct?: MobileProductKind;
   readonly fetch?: FetchLike;
+  readonly signal?: AbortSignal;
 }): Promise<HostDiscovery> {
   const fetcher = input.fetch ?? globalThis.fetch.bind(globalThis);
   const hostUrl = normalizeHostUrl(input.hostUrl);
@@ -36,17 +37,20 @@ export async function discoverHost(input: {
       fetcher,
       hostEndpoint(hostUrl, TAKOSUMI_WELL_KNOWN_PATH),
       TAKOSUMI_WELL_KNOWN_DECODER,
+      { signal: input.signal },
     ),
     fetchOptionalWire(
       fetcher,
       hostEndpoint(hostUrl, HOST_CAPABILITIES_PATH),
       HOST_CAPABILITIES_DECODER,
+      { signal: input.signal },
     ),
     productPath
       ? fetchOptionalWire(
           fetcher,
           hostEndpoint(hostUrl, productPath),
           MOBILE_PRODUCT_WELL_KNOWN_DECODER,
+          { signal: input.signal },
         )
       : undefined,
   ]);

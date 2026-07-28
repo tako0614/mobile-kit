@@ -1,14 +1,15 @@
 import type {
   MobileCallIntent,
   MobileBiometricPrompt,
-  MobileKeyValueStore,
   MobileLocalNotification,
+  MobilePersistentStore,
   MobileProductAdapter,
   MobilePushNotification,
   MobilePushProvider,
   MobilePushRegistration,
   MobilePushRegistrationInput,
   MobileClipboardText,
+  MobileSecureStore,
   NativeBridge,
 } from "./types.ts";
 import { createBrowserNativeBridge } from "./native.ts";
@@ -39,7 +40,7 @@ export interface TauriStoreHandle {
   readonly save: () => Promise<void>;
 }
 
-export type TauriSecureStoreAdapter = MobileKeyValueStore;
+export type TauriSecureStoreAdapter = MobileSecureStore;
 
 export interface TauriStrongholdAdapter {
   readonly load: (
@@ -784,7 +785,7 @@ export function createTauriInvokeKeystoreAdapter(
 function createTauriStore(
   adapter: TauriStoreAdapter,
   path: string,
-): MobileKeyValueStore {
+): MobilePersistentStore {
   let storePromise: Promise<TauriStoreHandle> | undefined;
   const store = () => {
     storePromise ??= adapter.load(path);

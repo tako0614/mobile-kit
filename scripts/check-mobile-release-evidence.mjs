@@ -3,24 +3,54 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { inspectMobileReleaseVersions } from "./mobile-release-versions.mjs";
 import { validateMobileReleaseEvidence } from "./mobile-release-evidence-validation.mjs";
+import { inspectMobileReleaseIdentity } from "./mobile-release-identity.mjs";
+import { validateMobileReleaseAttestation } from "./mobile-release-attestation.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const appDir = path.resolve(args.appDir ?? process.cwd());
-const product = requireArg(args.product, "--product");
-const productName = requireArg(args.productName, "--product-name");
-const bundleId = requireArg(args.bundleId, "--bundle-id");
+const requestedProduct = requireArg(args.product, "--product");
+const requestedProductName = requireArg(args.productName, "--product-name");
+const requestedBundleId = requireArg(args.bundleId, "--bundle-id");
+const identity = inspectMobileReleaseIdentity(appDir);
+const product = identity.product ?? requestedProduct;
+const productName = identity.productName ?? requestedProductName;
+const bundleId = identity.bundleId ?? requestedBundleId;
 const evidenceFile = path.resolve(
   appDir,
   args.file ??
     process.env.MOBILE_RELEASE_EVIDENCE_FILE ??
     "release/mobile-release-evidence.json",
 );
+const attestationFile = path.resolve(
+  appDir,
+  args.attestationFile ??
+    process.env.MOBILE_RELEASE_ATTESTATION_FILE ??
+    "release/mobile-release-attestation.json",
+);
 const results = [];
 
+for (const issue of identity.issues) {
+  fail(`${issue.id}: ${issue.detail}`);
+}
+expect(
+  requestedProduct === product,
+  "CLI product matches src/product.ts",
+);
+expect(
+  requestedProductName === productName,
+  "CLI product name matches tauri.conf productName",
+);
+expect(
+  requestedBundleId === bundleId,
+  "CLI bundle id matches tauri.conf identifier",
+);
 const tauriVersion = checkTauriConfig();
 checkReleaseVersionSources(tauriVersion);
 const evidence = readEvidence();
-if (evidence) checkEvidence(evidence, tauriVersion);
+if (evidence) {
+  checkEvidence(evidence.value, tauriVersion);
+  checkAttestation(evidence.bytes, tauriVersion);
+}
 
 printResults();
 if (results.some((result) => result.kind === "fail")) {
@@ -28,7 +58,7 @@ if (results.some((result) => result.kind === "fail")) {
 }
 
 function checkTauriConfig() {
-  const tauriConfig = readJson(path.join(appDir, "src-tauri/tauri.conf.json"));
+  const tauriConfig = identity.tauriConfig ?? {};
   expect(
     tauriConfig.productName === productName,
     "tauri.conf productName matches release evidence product name",
@@ -77,12 +107,39 @@ function readEvidence() {
     );
     return undefined;
   }
-  return readJson(evidenceFile);
+  const bytes = readFileSync(evidenceFile);
+  try {
+    return { value: JSON.parse(bytes.toString("utf8")), bytes };
+  } catch (cause) {
+    fail(`${relative(evidenceFile)} is not valid JSON: ${cause.message}`);
+    return undefined;
+  }
 }
 
 function checkEvidence(value, tauriVersion) {
   const validation = validateMobileReleaseEvidence({
     evidence: value,
+    product,
+    productName,
+    bundleId,
+    releaseVersion: tauriVersion,
+  });
+  for (const result of validation.results) {
+    results.push({ kind: result.kind, message: result.message });
+  }
+}
+
+function checkAttestation(evidenceBytes, tauriVersion) {
+  if (!existsSync(attestationFile)) {
+    fail(
+      `release evidence is declared but not verified: ${relative(attestationFile)} is missing`,
+    );
+    return;
+  }
+  const attestation = readJson(attestationFile);
+  const validation = validateMobileReleaseAttestation({
+    attestation,
+    evidenceBytes,
     product,
     productName,
     bundleId,
@@ -126,6 +183,7 @@ function expect(condition, message) {
 function printResults() {
   console.log(`Mobile release evidence check: ${productName} (${appDir})`);
   console.log(`Evidence file: ${relative(evidenceFile)}`);
+  console.log(`Attestation file: ${relative(attestationFile)}`);
   for (const result of results) {
     console.log(`${result.kind === "ok" ? "OK" : "FAIL"} ${result.message}`);
   }

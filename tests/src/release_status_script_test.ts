@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -468,6 +469,11 @@ function seedTauriConfig(
   });
   writeText(
     appDir,
+    "src/product.ts",
+    'export const productAdapter = { product: "takos" } as const;\n',
+  );
+  writeText(
+    appDir,
     "src-tauri/Cargo.toml",
     `[package]\nname = "takos-mobile"\nversion = "${version}"\n`,
   );
@@ -543,7 +549,34 @@ function writeText(appDir: string, relativePath: string, value: string) {
 function writeJson(appDir: string, relativePath: string, value: unknown) {
   const filePath = path.join(appDir, relativePath);
   mkdirSync(path.dirname(filePath), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+  const source = `${JSON.stringify(value, null, 2)}\n`;
+  writeFileSync(filePath, source);
+  if (relativePath === "release/mobile-release-evidence.json") {
+    const attestationPath = path.join(
+      appDir,
+      "release/mobile-release-attestation.json",
+    );
+    writeFileSync(
+      attestationPath,
+      `${JSON.stringify(
+        {
+          schema: "takos.mobile-release-attestation.v1",
+          state: "verified",
+          product: "takos",
+          productName: "Takos",
+          bundleId: "jp.takos.mobile",
+          releaseVersion: "1.2.3",
+          evidenceSha256: `sha256:${createHash("sha256")
+            .update(source)
+            .digest("hex")}`,
+          verifiedAt: "2026-07-01T01:00:00.000Z",
+          verifierRef: "private:mobile/takos/release-verifier",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
 }
 
 function validEvidence() {

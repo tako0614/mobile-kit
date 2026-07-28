@@ -3,6 +3,7 @@ import {
   beginMobileOidcSignIn,
   clearMobileSession,
   completeMobileOidcSignIn,
+  createBrowserNativeBridge,
   ensureFreshMobileSession,
   isOidcCallbackPayload,
   loadMobileSession,
@@ -12,6 +13,7 @@ import {
   refreshMobileSession,
   signInWithMobilePassword,
   type FetchLike,
+  type BrowserNativeWindow,
   type MobileProductAdapter,
   type NativeBridge,
 } from "../../src/index.ts";
@@ -123,6 +125,34 @@ test("completeMobileOidcSignIn exchanges code and stores session", async () => {
   expect(
     (await loadMobileSession({ adapter, nativeBridge: bridge }))?.hostUrl,
   ).toBe("https://host.example");
+});
+
+test("completeMobileOidcSignIn accepts only the registered callback target", async () => {
+  const bridge = memoryBridge();
+  await beginMobileOidcSignIn({
+    adapter,
+    discovery: {
+      hostUrl: "https://host.example",
+      oidcIssuer: "https://host.example",
+      oidcClientId: "takos-mobile-host-example",
+    },
+    nativeBridge: bridge,
+    fetch: oidcFetch(),
+  });
+  const pending = JSON.parse(
+    (await bridge.secureStore?.get(mobileAuthRequestStorageKey(adapter))) ?? "",
+  ) as { state: string };
+
+  await expect(
+    completeMobileOidcSignIn({
+      adapter,
+      nativeBridge: bridge,
+      callbackUrl: `takos://connect?code=code-1&state=${pending.state}`,
+      fetch: oidcFetch(),
+    }),
+  ).rejects.toThrow(
+    "OIDC callback URL does not match the registered redirect URI.",
+  );
 });
 
 test("completeMobileOidcSignIn exchanges the IdP token for a host session when advertised", async () => {
@@ -296,9 +326,9 @@ test("persistMobileSession explicitly saves an exchanged session", async () => {
   expect(
     await bridge.secureStore?.get(mobileSessionStorageKey(adapter)),
   ).toContain('"accessToken":"access-1"');
-  expect(await bridge.storage?.get(mobileSessionStorageKey(adapter))).toBe(
-    "legacy-session",
-  );
+  expect(
+    await bridge.storage?.get(mobileSessionStorageKey(adapter)),
+  ).toBeUndefined();
 });
 
 test("completeMobileOidcSignIn rejects and clears an expired pending request", async () => {
@@ -362,9 +392,9 @@ test("mobile auth prefers secureStore and clears legacy persistent storage", asy
   expect(
     await bridge.secureStore?.get(mobileSessionStorageKey(adapter)),
   ).toContain('"accessToken":"access-1"');
-  expect(await bridge.storage?.get(mobileSessionStorageKey(adapter))).toBe(
-    "legacy-session",
-  );
+  expect(
+    await bridge.storage?.get(mobileSessionStorageKey(adapter)),
+  ).toBeUndefined();
   expect(
     (await loadMobileSession({ adapter, nativeBridge: bridge }))?.accessToken,
   ).toBe("access-1");
@@ -374,6 +404,87 @@ test("mobile auth prefers secureStore and clears legacy persistent storage", asy
   ).toBeUndefined();
   expect(
     await bridge.storage?.get(mobileSessionStorageKey(adapter)),
+  ).toBeUndefined();
+});
+
+test("browser OIDC credentials stay in bridge-scoped memory", async () => {
+  const window = browserWindow();
+  const bridge = createBrowserNativeBridge({ window });
+  const pending = await beginMobileOidcSignIn({
+    adapter,
+    discovery: {
+      hostUrl: "https://host.example",
+      oidcIssuer: "https://host.example",
+      oidcClientId: "takos-mobile-host-example",
+    },
+    nativeBridge: bridge,
+    fetch: oidcFetch(),
+  });
+
+  expect(
+    await bridge.storage?.get(mobileAuthRequestStorageKey(adapter)),
+  ).toBeUndefined();
+  await completeMobileOidcSignIn({
+    adapter,
+    nativeBridge: bridge,
+    callbackUrl:
+      `takos://oauth/callback?code=code-1&state=${pending.request.state}`,
+    fetch: oidcFetch(),
+  });
+  expect(
+    await bridge.storage?.get(mobileSessionStorageKey(adapter)),
+  ).toBeUndefined();
+  expect(
+    (await loadMobileSession({ adapter, nativeBridge: bridge }))?.accessToken,
+  ).toBe("access-1");
+
+  const reloadedBridge = createBrowserNativeBridge({ window });
+  expect(
+    await loadMobileSession({ adapter, nativeBridge: reloadedBridge }),
+  ).toBeUndefined();
+});
+
+test("browser consumes a legacy plaintext session once without new fallback writes", async () => {
+  const window = browserWindow();
+  const bridge = createBrowserNativeBridge({ window });
+  await bridge.storage?.set(
+    mobileSessionStorageKey(adapter),
+    JSON.stringify({
+      hostUrl: "https://host.example",
+      product: "takos",
+      accessToken: "legacy-access",
+      tokenType: "Bearer",
+      createdAt: "2026-06-30T00:00:00.000Z",
+    }),
+  );
+
+  expect(
+    (await loadMobileSession({ adapter, nativeBridge: bridge }))?.accessToken,
+  ).toBe("legacy-access");
+  expect(
+    await bridge.storage?.get(mobileSessionStorageKey(adapter)),
+  ).toBeUndefined();
+  await persistMobileSession({
+    adapter,
+    nativeBridge: bridge,
+    session: {
+      hostUrl: "https://host.example",
+      product: "takos",
+      accessToken: "replacement-access",
+      tokenType: "Bearer",
+      createdAt: "2026-06-30T01:00:00.000Z",
+    },
+  });
+  expect(
+    await bridge.storage?.get(mobileSessionStorageKey(adapter)),
+  ).toBeUndefined();
+  expect(
+    (
+      await loadMobileSession({
+        adapter,
+        nativeBridge: createBrowserNativeBridge({ window }),
+      })
+    )?.accessToken,
   ).toBeUndefined();
 });
 
@@ -433,6 +544,70 @@ test("refreshMobileSession can return a rotation without persisting it", async (
   });
 
   expect(session.accessToken).toBe("access-refreshed");
+  expect(
+    await bridge.secureStore?.get(mobileSessionStorageKey(adapter)),
+  ).toBeUndefined();
+});
+
+test("refreshMobileSession rejects malformed token responses at runtime", async () => {
+  await expect(
+    refreshMobileSession({
+      adapter,
+      nativeBridge: memoryBridge(),
+      session: {
+        hostUrl: "https://host.example",
+        product: "takos",
+        oidcIssuer: "https://host.example",
+        oidcClientId: "takos-mobile-host-example",
+        accessToken: "expired-access",
+        tokenType: "Bearer",
+        refreshToken: "refresh-1",
+        createdAt: "2026-06-30T00:00:00.000Z",
+      },
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/.well-known/openid-configuration")) {
+          return Response.json({
+            issuer: "https://host.example",
+            authorization_endpoint: "https://host.example/oauth/authorize",
+            token_endpoint: "https://host.example/oauth/token",
+          });
+        }
+        return Response.json({
+          access_token: 42,
+          token_type: "Bearer",
+          expires_in: "3600",
+        });
+      },
+    }),
+  ).rejects.toThrow("Invalid OIDC token response");
+});
+
+test("mobile sessions are bound to the adapter product", async () => {
+  const bridge = memoryBridge();
+  const wrongProductSession = {
+    hostUrl: "https://host.example",
+    product: "yurucommu" as const,
+    accessToken: "cross-product-token",
+    tokenType: "Bearer",
+    createdAt: "2026-06-30T00:00:00.000Z",
+  };
+
+  await expect(
+    persistMobileSession({
+      adapter,
+      nativeBridge: bridge,
+      session: wrongProductSession,
+    }),
+  ).rejects.toThrow("Mobile session product does not match this app.");
+
+  await bridge.secureStore?.set(
+    mobileSessionStorageKey(adapter),
+    JSON.stringify(wrongProductSession),
+  );
+  await expect(
+    loadMobileSession({ adapter, nativeBridge: bridge }),
+  ).rejects.toThrow("Mobile session product does not match this app.");
   expect(
     await bridge.secureStore?.get(mobileSessionStorageKey(adapter)),
   ).toBeUndefined();
@@ -535,6 +710,23 @@ function oidcFetchWithIdToken(): FetchLike {
       return response;
     const token = (await response.json()) as Record<string, unknown>;
     return Response.json({ ...token, id_token: "id-1" });
+  };
+}
+
+function browserWindow(): BrowserNativeWindow {
+  const values = new Map<string, string>();
+  return {
+    location: { href: "https://mobile.example" },
+    localStorage: {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => {
+        values.set(key, value);
+      },
+      removeItem: (key) => {
+        values.delete(key);
+      },
+    },
+    open() {},
   };
 }
 

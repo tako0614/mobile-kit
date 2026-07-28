@@ -51,7 +51,6 @@ export function createBrowserNativeBridge(
       persistentStorage: Boolean(browserStore),
     },
     storage: browserStore,
-    secureStore: browserStore,
     async getLaunchPayload() {
       if (!windowRef) return undefined;
       const url = new URL(windowRef.location.href);
@@ -88,7 +87,7 @@ function readGlobalWindow(): BrowserNativeWindow | undefined {
 
 function createBrowserLocalStore(
   localStorage: BrowserLocalStorage | undefined,
-): NativeBridge["secureStore"] {
+): NativeBridge["storage"] {
   if (!localStorage) return undefined;
   return {
     kind: "browser-local",

@@ -20,7 +20,11 @@ import type {
   MobileSessionUnlockOptions,
   NativeBridge,
 } from "./types.ts";
-import { createMobileHostRouteUrl, openMobileHostRoute } from "./url.ts";
+import {
+  createMobileHostRouteUrl,
+  openMobileHostRoute,
+  type MobileHostRouteHandoff,
+} from "./url.ts";
 import { mobileErrorMessage } from "./error.ts";
 import { copyMobileText } from "./shell.ts";
 import type {
@@ -98,7 +102,8 @@ export interface MobileClientShellProps<Home> {
   ) => Promise<void>;
   readonly handlePushNotification?: (
     input: MobilePushNotificationCallbackInput,
-  ) => Promise<void> | void;
+  ) => Promise<boolean | void> | boolean | void;
+  readonly openHostRoute?: MobileHostRouteHandoff;
   readonly sessionUnlock?: MobileSessionUnlockOptions;
   readonly homeLabel: string;
   readonly copy: MobileShellCopy<Home>;
@@ -117,13 +122,19 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
     registerPush: props.registerPush,
     unregisterPush: props.unregisterPush,
     handlePushNotification: async (input) => {
-      await props.handlePushNotification?.(input);
+      const consumed = await props.handlePushNotification?.(input);
+      if (consumed) return;
       if (input.kind !== "tapped") return;
       const routePath = resolvePushNotificationPath(input);
-      if (routePath) {
-        await openMobileHostRoute(props.nativeBridge, input.session, routePath);
+      if (routePath && props.openHostRoute) {
+        await openMobileHostRoute(
+          props.openHostRoute,
+          input.session,
+          routePath,
+        );
       }
     },
+    openHostRoute: props.openHostRoute,
     sessionUnlock: props.sessionUnlock,
     homeLabel: props.homeLabel,
   });
@@ -216,7 +227,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       });
       return;
     }
-    await openMobileHostRoute(props.nativeBridge, session, routePath);
+    await openMobileHostRoute(props.openHostRoute, session, routePath);
   }
 
   async function copyHostUrl(session: MobileSession) {
@@ -245,6 +256,13 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
     controller.actions.find((action) => action.id === "host");
   const qrAction = () =>
     controller.actions.find((action) => action.id === "qr");
+  const availableHostActions = () =>
+    props.hostActions.filter(
+      (action) =>
+        Boolean(props.openHostRoute) ||
+        (action.nativeIntent === "call" &&
+          Boolean(props.nativeBridge.requestCall)),
+    );
 
   return (
     <main
@@ -475,9 +493,11 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
               </div>
               <Show when={state().connectPayload?.setupTicket}>
                 <div>
-                  <dt>Host Center handoff</dt>
+                  <dt>Setup reference</dt>
                   <dd>
-                    <span class="handoff-pill">Setup ticket received</span>
+                    <span class="handoff-pill">
+                      Unverified setup reference received.
+                    </span>
                   </dd>
                 </div>
               </Show>
@@ -586,26 +606,28 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                 )}
               </For>
             </div>
-            <div class="quick-actions" aria-label={props.copy.shortcutsLabel}>
-              <For each={props.hostActions}>
-                {(action) => (
-                  <button
-                    type="button"
-                    class="quick-action"
-                    onClick={() => void openHostAction(current(), action)}
-                  >
-                    <span>{action.label}</span>
-                    <small>{action.description}</small>
-                  </button>
-                )}
-              </For>
-            </div>
+            <Show when={availableHostActions().length > 0}>
+              <div class="quick-actions" aria-label={props.copy.shortcutsLabel}>
+                <For each={availableHostActions()}>
+                  {(action) => (
+                    <button
+                      type="button"
+                      class="quick-action"
+                      onClick={() => void openHostAction(current(), action)}
+                    >
+                      <span>{action.label}</span>
+                      <small>{action.description}</small>
+                    </button>
+                  )}
+                </For>
+              </div>
+            </Show>
             {props.renderHomeExtra?.({
               home: state().home,
               session: current(),
               refreshHome: () => controller.refreshHome(current()),
               openHostRoute: (path) =>
-                openMobileHostRoute(props.nativeBridge, current(), path),
+                openMobileHostRoute(props.openHostRoute, current(), path),
               openExternalUrl: (url) => props.nativeBridge.openExternalUrl(url),
               writeClipboardText: props.nativeBridge.writeClipboardText,
             })}

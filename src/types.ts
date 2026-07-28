@@ -173,14 +173,30 @@ export interface NativeBridgeCapabilities {
   readonly persistentStorage: boolean;
 }
 
-export interface MobileKeyValueStore {
-  readonly kind: "secure" | "device-persistent" | "browser-local";
+interface MobileKeyValueStoreOperations {
   readonly get: (key: string) => Promise<string | undefined>;
   readonly set: (key: string, value: string) => Promise<void>;
   readonly delete: (key: string) => Promise<void>;
 }
 
-export type MobileSecureStore = MobileKeyValueStore;
+/** Non-credential persistence for preferences and recent-host metadata. */
+export type MobilePersistentStore = MobileKeyValueStoreOperations & {
+  readonly kind: "device-persistent" | "browser-local";
+};
+
+/**
+ * Credential-capable persistent storage.
+ *
+ * `NativeBridge.secureStore` must never be backed by browser localStorage or a
+ * plain device preference store. Keeping the discriminator exact makes that
+ * boundary compile-time visible to every bridge implementation.
+ */
+export type MobileSecureStore = MobileKeyValueStoreOperations & {
+  readonly kind: "secure";
+};
+
+/** A store accepted by APIs that deliberately support either storage class. */
+export type MobileKeyValueStore = MobilePersistentStore | MobileSecureStore;
 
 export interface MobileAuthRequest {
   readonly hostUrl: string;
@@ -262,7 +278,7 @@ export interface MobileSessionUnlockOptions {
 
 export interface NativeBridge {
   readonly capabilities: NativeBridgeCapabilities;
-  readonly storage?: MobileKeyValueStore;
+  readonly storage?: MobilePersistentStore;
   readonly secureStore?: MobileSecureStore;
   readonly getLaunchPayload: () => Promise<string | undefined>;
   readonly onLaunchPayload?: (

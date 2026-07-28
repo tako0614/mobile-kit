@@ -7,6 +7,7 @@ import {
   resolveNotificationPusherEndpoint,
   resolveNotificationPusherGatewayUrl,
   unregisterNotificationPusherWithHost,
+  WireDecodeError,
   type MobileSession,
   type NotificationPusher,
 } from "../../src/index.ts";
@@ -54,6 +55,59 @@ test("createMobileApiClient exposes authorization failures as typed errors", asy
     expect(error).toBeInstanceOf(MobileApiError);
     expect((error as MobileApiError).status).toBe(403);
     expect((error as MobileApiError).path).toBe("/api/spaces");
+  }
+});
+
+test("createMobileApiClient wire validates bearer-authenticated responses", async () => {
+  const requests: Request[] = [];
+  const client = createMobileApiClient({
+    session: session(),
+    fetch: async (input, init) => {
+      requests.push(new Request(input, init));
+      return json({ value: "accepted" });
+    },
+  });
+  const result = await client.wire("/api/value", {
+    document: "value",
+    decode(value) {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        !("value" in value) ||
+        typeof value.value !== "string"
+      ) {
+        throw new Error("value must be a string");
+      }
+      return value.value;
+    },
+  });
+
+  expect(result).toBe("accepted");
+  expect(requests[0].headers.get("authorization")).toBe("Bearer access-1");
+});
+
+test("createMobileApiClient wire reports malformed host data with its URL", async () => {
+  const client = createMobileApiClient({
+    session: session(),
+    fetch: async () => json({ value: 42 }),
+  });
+
+  try {
+    await client.wire("/api/value", {
+      document: "value",
+      decode() {
+        throw new Error("value must be a string");
+      },
+    });
+    throw new Error("expected decoding to fail");
+  } catch (error) {
+    expect(error).toBeInstanceOf(WireDecodeError);
+    expect((error as WireDecodeError).url).toBe(
+      "https://host.example/api/value",
+    );
+    expect((error as WireDecodeError).reason).toBe(
+      "value must be a string",
+    );
   }
 });
 

@@ -3,7 +3,6 @@ import type {
   MobileHostableProductKind,
   MobileProductKind,
   MobileSession,
-  NativeBridge,
 } from "./types.ts";
 import { createTakosumiAppHandoffUrl } from "./contract/app-handoff.ts";
 import { requireMobileProductKey } from "./product-key.ts";
@@ -77,14 +76,31 @@ export function createMobileHostRouteUrl(
   return url.toString();
 }
 
+export interface MobileHostRouteHandoffInput {
+  readonly session: MobileSession;
+  readonly path: string;
+  readonly url: string;
+}
+
+/**
+ * Product-owned authenticated route handoff. The shared kit validates the
+ * same-origin URL, but never opens it directly because an external browser
+ * does not carry the mobile bearer session.
+ */
+export type MobileHostRouteHandoff = (
+  input: MobileHostRouteHandoffInput,
+) => Promise<void>;
+
 export async function openMobileHostRoute(
-  nativeBridge: NativeBridge,
+  handoff: MobileHostRouteHandoff | undefined,
   session: MobileSession,
   routePath: string,
 ): Promise<void> {
-  await nativeBridge.openExternalUrl(
-    createMobileHostRouteUrl(session, routePath),
-  );
+  const url = createMobileHostRouteUrl(session, routePath);
+  if (!handoff) {
+    throw new Error("Mobile host route requires an authenticated handoff.");
+  }
+  await handoff({ session, path: routePath, url });
 }
 
 export function createTakosumiHostCenterUrl(input: {

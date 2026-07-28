@@ -38,6 +38,33 @@ export const OIDC_DISCOVERY_DECODER: WireDecoder<Partial<OidcMetadata>> = {
   },
 };
 
+export const OIDC_TOKEN_RESPONSE_DECODER: WireDecoder<OidcTokenResponse> = {
+  document: "OIDC token response",
+  decode(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error("document must be a JSON object");
+    }
+    const record = value as Record<string, unknown>;
+    requireNonEmptyTokenString(record, "access_token");
+    requireNonEmptyTokenString(record, "token_type");
+    for (const field of ["refresh_token", "id_token", "scope"] as const) {
+      const entry = record[field];
+      if (entry !== undefined && typeof entry !== "string") {
+        throw new Error(`${field} must be a string`);
+      }
+    }
+    if (
+      record.expires_in !== undefined &&
+      (typeof record.expires_in !== "number" ||
+        !Number.isFinite(record.expires_in) ||
+        record.expires_in < 0)
+    ) {
+      throw new Error("expires_in must be a non-negative finite number");
+    }
+    return record as unknown as OidcTokenResponse;
+  },
+};
+
 const verifierAlphabet =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
@@ -124,8 +151,20 @@ export function createOidcAuthorizationUrl(
 export function parseOidcCallback(
   callbackUrl: string,
   expectedState: string,
+  expectedRedirectUri?: string,
 ): OidcCallbackResult {
   const url = new URL(callbackUrl);
+  if (
+    expectedRedirectUri &&
+    callbackTarget(url) !== callbackTarget(new URL(expectedRedirectUri))
+  ) {
+    throw new Error(
+      "OIDC callback URL does not match the registered redirect URI.",
+    );
+  }
+  if (url.hash) {
+    throw new Error("OIDC callback URL must not include a fragment.");
+  }
   const error = url.searchParams.get("error");
   if (error) throw new Error(`OIDC callback failed: ${error}`);
   const code = url.searchParams.get("code");
@@ -165,14 +204,14 @@ export async function exchangeOidcCode(
   if (!response.ok) {
     throw new Error(`OIDC token exchange failed: ${response.status}`);
   }
-  const token = (await response.json()) as OidcTokenResponse;
-  if (!token.access_token) {
-    throw new Error("OIDC token response is missing access token.");
-  }
-  if (!token.token_type) {
-    throw new Error("OIDC token response is missing token type.");
-  }
-  return token;
+  return decodeOidcTokenResponse(await response.json(), tokenEndpoint);
+}
+
+export function decodeOidcTokenResponse(
+  value: unknown,
+  source: string,
+): OidcTokenResponse {
+  return decodeWire(OIDC_TOKEN_RESPONSE_DECODER, value, source);
 }
 
 function normalizeOidcIssuer(value: unknown, label: string): string {
@@ -193,6 +232,23 @@ function normalizeOidcEndpoint(value: unknown, label: string): string {
   const url = requireSecureWebUrl(value.trim(), label);
   if (url.hash) throw new Error(`${label} must not include a fragment.`);
   return url.toString();
+}
+
+function callbackTarget(url: URL): string {
+  const target = new URL(url.toString());
+  target.search = "";
+  target.hash = "";
+  return target.toString();
+}
+
+function requireNonEmptyTokenString(
+  record: Record<string, unknown>,
+  field: string,
+): void {
+  const value = record[field];
+  if (typeof value !== "string" || !value) {
+    throw new Error(`${field} must be a non-empty string`);
+  }
 }
 
 function createRandomVerifier(cryptoSource: Crypto, length = 64): string {

@@ -43,6 +43,11 @@ export interface MobileProductWellKnown {
     readonly password?: boolean;
   };
   readonly apiBaseUrl?: string;
+  /**
+   * Portable, exact capability tokens advertised by the product host.
+   * Product shells may require a subset through `requiredHostCapabilities`.
+   */
+  readonly capabilities?: readonly string[];
   readonly endpoints?: MobileProductWellKnownEndpoints;
   readonly [key: string]: unknown;
 }

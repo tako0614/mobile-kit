@@ -35,10 +35,9 @@ export async function fetchWire<T>(
   fetcher: FetchLike,
   url: string,
   decoder: WireDecoder<T>,
+  init?: RequestInit,
 ): Promise<T> {
-  const response = await fetcher(url, {
-    headers: { accept: "application/json" },
-  });
+  const response = await fetcher(url, jsonRequest(init));
   if (!response.ok) {
     throw new Error(`Discovery request failed: ${response.status} ${url}`);
   }
@@ -50,10 +49,9 @@ export async function fetchOptionalWire<T>(
   fetcher: FetchLike,
   url: string,
   decoder: WireDecoder<T>,
+  init?: RequestInit,
 ): Promise<T | undefined> {
-  const response = await fetcher(url, {
-    headers: { accept: "application/json" },
-  });
+  const response = await fetcher(url, jsonRequest(init));
   if (response.status === 404) return undefined;
   if (!response.ok) {
     throw new Error(`Discovery request failed: ${response.status} ${url}`);
@@ -75,4 +73,10 @@ export function decodeWire<T>(
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+function jsonRequest(init: RequestInit | undefined): RequestInit {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("accept")) headers.set("accept", "application/json");
+  return { ...init, headers };
 }

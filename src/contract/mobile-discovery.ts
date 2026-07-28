@@ -102,6 +102,9 @@ export const MOBILE_PRODUCT_WELL_KNOWN_DECODER: WireDecoder<MobileProductWellKno
       requireOptionalString(record, "issuer");
       requireOptionalString(record, "oidcClientId");
       requireOptionalString(record, "apiBaseUrl");
+      if (record.capabilities !== undefined) {
+        requireCapabilityTokens(record.capabilities, "capabilities");
+      }
       if (record.auth !== undefined) {
         const auth = requireRecordAt(record.auth, "auth");
         requireOptionalBoolean(auth, "oidc", "auth.oidc");
@@ -490,5 +493,30 @@ function requireOptionalBoolean(
   const value = record[key];
   if (value !== undefined && typeof value !== "boolean") {
     throw new Error(`${label} must be a boolean`);
+  }
+}
+
+function requireCapabilityTokens(value: unknown, label: string): void {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array`);
+  }
+  if (value.length > 128) {
+    throw new Error(`${label} must contain at most 128 tokens`);
+  }
+  const seen = new Set<string>();
+  for (const [index, token] of value.entries()) {
+    if (
+      typeof token !== "string" ||
+      token.length < 1 ||
+      token.length > 128 ||
+      token.trim() !== token ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(token)
+    ) {
+      throw new Error(`${label}[${index}] is not a valid capability token`);
+    }
+    if (seen.has(token)) {
+      throw new Error(`${label} must not contain duplicate tokens`);
+    }
+    seen.add(token);
   }
 }

@@ -13,6 +13,7 @@ import {
   createOidcAuthorizationUrl,
   createPkcePair,
   createRandomState,
+  decodeOidcTokenResponse,
   exchangeOidcCode,
   fetchOidcMetadata,
   parseOidcCallback,
@@ -25,6 +26,16 @@ import {
 import { requireMobileProductKey } from "./product-key.ts";
 
 const MOBILE_AUTH_REQUEST_TTL_MS = 10 * 60 * 1000;
+type MobileCredentialStore = Pick<
+  MobileKeyValueStore,
+  "get" | "set" | "delete"
+> & {
+  readonly kind: "secure" | "memory";
+};
+const volatileCredentialStores = new WeakMap<
+  NativeBridge,
+  MobileCredentialStore
+>();
 
 export interface BeginMobileOidcSignInInput {
   readonly adapter: MobileProductAdapter;
@@ -109,7 +120,6 @@ export function mobileSessionStorageKey(adapter: MobileProductAdapter): string {
 export async function beginMobileOidcSignIn(
   input: BeginMobileOidcSignInInput,
 ): Promise<BeginMobileOidcSignInResult> {
-  const store = requireMobileStore(input.nativeBridge);
   const oidcClientId = mobileClientId(input.discovery);
   const oidcIssuer = requireDiscoveryOidcIssuer(input.discovery);
   const metadata = await fetchOidcMetadata({
@@ -136,7 +146,8 @@ export async function beginMobileOidcSignIn(
     createdAt: (input.now?.() ?? new Date()).toISOString(),
   };
 
-  await store.set(
+  await writeCredential(
+    input.nativeBridge,
     mobileAuthRequestStorageKey(input.adapter),
     stringify(request),
   );
@@ -157,11 +168,18 @@ export async function beginMobileOidcSignIn(
 export async function completeMobileOidcSignIn(
   input: CompleteMobileOidcSignInInput,
 ): Promise<MobileSession> {
-  const store = requireMobileStore(input.nativeBridge);
-  const request = await loadMobileAuthRequest(input.adapter, store, input.now);
+  const request = await loadMobileAuthRequest(
+    input.adapter,
+    input.nativeBridge,
+    input.now,
+  );
   if (!request) throw new Error("No pending mobile sign-in request.");
 
-  const callback = parseOidcCallback(input.callbackUrl, request.state);
+  const callback = parseOidcCallback(
+    input.callbackUrl,
+    request.state,
+    request.redirectUri,
+  );
   const metadata = await fetchOidcMetadata({
     issuer: request.oidcIssuer,
     fetch: input.fetch,
@@ -198,9 +216,12 @@ export async function completeMobileOidcSignIn(
   }
 
   if (input.persistSession !== false) {
-    await storeMobileSession(input.adapter, store, session);
+    await storeMobileSession(input.adapter, input.nativeBridge, session);
   }
-  await store.delete(mobileAuthRequestStorageKey(input.adapter));
+  await deleteCredentialFromStores(
+    input.nativeBridge,
+    mobileAuthRequestStorageKey(input.adapter),
+  );
   return session;
 }
 
@@ -225,11 +246,7 @@ export async function signInWithMobilePassword(
     now: input.now,
   });
   if (input.persistSession !== false) {
-    await storeMobileSession(
-      input.adapter,
-      requireMobileStore(input.nativeBridge),
-      session,
-    );
+    await storeMobileSession(input.adapter, input.nativeBridge, session);
   }
   return session;
 }
@@ -264,11 +281,7 @@ export async function revokeMobileHostSession(
 export async function persistMobileSession(
   input: PersistMobileSessionInput,
 ): Promise<void> {
-  await storeMobileSession(
-    input.adapter,
-    requireMobileStore(input.nativeBridge),
-    input.session,
-  );
+  await storeMobileSession(input.adapter, input.nativeBridge, input.session);
 }
 
 export async function ensureFreshMobileSession(
@@ -285,13 +298,13 @@ export async function ensureFreshMobileSession(
 export async function refreshMobileSession(
   input: RefreshMobileSessionInput,
 ): Promise<MobileSession> {
+  requireSessionProduct(input.adapter, input.session);
   if (!input.session.refreshToken) {
     throw new Error("Mobile session has no refresh token.");
   }
   if (!input.session.oidcIssuer) {
     throw new Error("Mobile session has no OIDC issuer.");
   }
-  const store = requireMobileStore(input.nativeBridge);
   const oidcClientId = requireSessionMobileClientId(input.session);
   const metadata = await fetchOidcMetadata({
     issuer: input.session.oidcIssuer,
@@ -316,18 +329,24 @@ export async function refreshMobileSession(
   });
   if (!response.ok) {
     if (input.persistSession !== false) {
-      await store.delete(mobileSessionStorageKey(input.adapter));
+      await deleteCredentialFromStores(
+        input.nativeBridge,
+        mobileSessionStorageKey(input.adapter),
+      );
     }
     throw new Error(`Mobile session refresh failed: ${response.status}`);
   }
-  const token = (await response.json()) as OidcTokenResponse;
+  const token = decodeOidcTokenResponse(
+    await response.json(),
+    metadata.token_endpoint,
+  );
   const session = createMobileSessionFromRefresh({
     session: input.session,
     token,
     now: input.now,
   });
   if (input.persistSession !== false) {
-    await storeMobileSession(input.adapter, store, session);
+    await storeMobileSession(input.adapter, input.nativeBridge, session);
   }
   return session;
 }
@@ -336,22 +355,49 @@ export async function loadMobileSession(input: {
   readonly adapter: MobileProductAdapter;
   readonly nativeBridge: NativeBridge;
 }): Promise<MobileSession | undefined> {
-  const raw = await getFromMobileStores(
-    input.nativeBridge,
-    mobileSessionStorageKey(input.adapter),
-  );
+  const key = mobileSessionStorageKey(input.adapter);
+  const { raw, fromLegacy } = await readCredential(input.nativeBridge, key);
   if (!raw) return undefined;
-  return parseMobileSession(raw);
+  let session: MobileSession;
+  try {
+    session = parseMobileSession(raw, input.adapter.product);
+  } catch (error) {
+    await deleteCredentialFromStores(input.nativeBridge, key);
+    throw error;
+  }
+  if (fromLegacy) {
+    // A legacy browser/device preference value is consumed once, removed from
+    // that store, then retained only in a real secure store or this process's
+    // volatile memory. It is never written back to ordinary persistence.
+    await writeCredential(input.nativeBridge, key, stringify(session));
+  }
+  return session;
 }
 
 export async function clearMobileSession(input: {
   readonly adapter: MobileProductAdapter;
   readonly nativeBridge: NativeBridge;
 }): Promise<void> {
-  await deleteFromMobileStores(
+  await deleteCredentialFromStores(
     input.nativeBridge,
     mobileSessionStorageKey(input.adapter),
   );
+}
+
+export async function clearMobileCredentials(input: {
+  readonly adapter: MobileProductAdapter;
+  readonly nativeBridge: NativeBridge;
+}): Promise<void> {
+  await Promise.all([
+    deleteCredentialFromStores(
+      input.nativeBridge,
+      mobileSessionStorageKey(input.adapter),
+    ),
+    deleteCredentialFromStores(
+      input.nativeBridge,
+      mobileAuthRequestStorageKey(input.adapter),
+    ),
+  ]);
 }
 
 export function isOidcCallbackPayload(payload: string): boolean {
@@ -432,10 +478,11 @@ function mobileSessionNeedsRefresh(
 
 async function loadMobileAuthRequest(
   adapter: MobileProductAdapter,
-  store: MobileKeyValueStore,
+  nativeBridge: NativeBridge,
   now: (() => Date) | undefined,
 ): Promise<MobileAuthRequest | undefined> {
-  const raw = await store.get(mobileAuthRequestStorageKey(adapter));
+  const key = mobileAuthRequestStorageKey(adapter);
+  const { raw } = await readCredential(nativeBridge, key);
   if (!raw) return undefined;
   const parsed = JSON.parse(raw) as Partial<MobileAuthRequest>;
   if (
@@ -459,7 +506,7 @@ async function loadMobileAuthRequest(
     (now?.() ?? new Date()).getTime() - createdAtMs >
     MOBILE_AUTH_REQUEST_TTL_MS
   ) {
-    await store.delete(mobileAuthRequestStorageKey(adapter));
+    await deleteCredentialFromStores(nativeBridge, key);
     throw new Error("Pending mobile sign-in request has expired.");
   }
   return {
@@ -468,7 +515,10 @@ async function loadMobileAuthRequest(
   };
 }
 
-function parseMobileSession(raw: string): MobileSession {
+function parseMobileSession(
+  raw: string,
+  expectedProduct: MobileProductAdapter["product"],
+): MobileSession {
   const parsed = JSON.parse(raw) as Partial<MobileSession>;
   if (
     typeof parsed.hostUrl !== "string" ||
@@ -483,6 +533,9 @@ function parseMobileSession(raw: string): MobileSession {
     typeof parsed.createdAt !== "string"
   ) {
     throw new Error("Stored mobile session is invalid.");
+  }
+  if (parsed.product !== expectedProduct) {
+    throw new Error("Mobile session product does not match this app.");
   }
   return {
     ...(parsed as MobileSession),
@@ -603,39 +656,112 @@ function requireSessionMobileClientId(session: MobileSession): string {
   return clientId;
 }
 
-function requireMobileStore(nativeBridge: NativeBridge): MobileKeyValueStore {
-  const store = nativeBridge.secureStore ?? nativeBridge.storage;
-  if (!store) {
-    throw new Error("Mobile auth storage is unavailable.");
+/**
+ * Credentials are persisted only by a `kind: secure` store. A browser or a
+ * native runtime without a keystore receives a bridge-scoped in-memory store:
+ * sign-in can continue while the process lives, but a reload intentionally
+ * forgets the PKCE verifier and tokens.
+ */
+function mobileCredentialStore(
+  nativeBridge: NativeBridge,
+): MobileCredentialStore {
+  const secureStore = nativeBridge.secureStore;
+  if (secureStore) {
+    if (secureStore.kind !== "secure") {
+      throw new Error("Mobile secureStore must use kind=secure.");
+    }
+    return secureStore;
   }
-  return store;
+  const existing = volatileCredentialStores.get(nativeBridge);
+  if (existing) return existing;
+  const values = new Map<string, string>();
+  const memoryStore: MobileCredentialStore = {
+    kind: "memory",
+    async get(key) {
+      return values.get(key);
+    },
+    async set(key, value) {
+      values.set(key, value);
+    },
+    async delete(key) {
+      values.delete(key);
+    },
+  };
+  volatileCredentialStores.set(nativeBridge, memoryStore);
+  return memoryStore;
 }
 
-async function getFromMobileStores(
+/**
+ * Read one pre-hardening credential value from ordinary persistence and delete
+ * it before returning. Callers may move a validated value to secure storage or
+ * volatile memory, but never write credentials back to this legacy store.
+ */
+async function readCredential(
   nativeBridge: NativeBridge,
   key: string,
-): Promise<string | undefined> {
-  const secureValue = await nativeBridge.secureStore?.get(key);
-  if (secureValue !== undefined) return secureValue;
-  return await nativeBridge.storage?.get(key);
+): Promise<{
+  readonly raw: string | undefined;
+  readonly fromLegacy: boolean;
+}> {
+  const credentialStore = mobileCredentialStore(nativeBridge);
+  const legacyStore = nativeBridge.storage;
+  const credential = await credentialStore.get(key);
+  if (credential !== undefined) {
+    await legacyStore?.delete(key);
+    return { raw: credential, fromLegacy: false };
+  }
+  if (!legacyStore) return { raw: undefined, fromLegacy: false };
+  const value = await legacyStore.get(key);
+  if (value === undefined) return { raw: undefined, fromLegacy: false };
+  await legacyStore.delete(key);
+  return { raw: value, fromLegacy: true };
 }
 
-async function deleteFromMobileStores(
+async function writeCredential(
+  nativeBridge: NativeBridge,
+  key: string,
+  value: string,
+): Promise<void> {
+  const credentialStore = mobileCredentialStore(nativeBridge);
+  // Remove stale plaintext before committing the replacement. If the secure
+  // write fails, failing closed is preferable to retaining a usable token in
+  // ordinary persistence.
+  await nativeBridge.storage?.delete(key);
+  await credentialStore.set(key, value);
+}
+
+async function deleteCredentialFromStores(
   nativeBridge: NativeBridge,
   key: string,
 ): Promise<void> {
+  const credentialStore = mobileCredentialStore(nativeBridge);
+  const legacyStore = nativeBridge.storage;
   await Promise.all([
-    nativeBridge.secureStore?.delete(key),
-    nativeBridge.storage?.delete(key),
+    credentialStore.delete(key),
+    legacyStore ? legacyStore.delete(key) : Promise.resolve(),
   ]);
 }
 
 async function storeMobileSession(
   adapter: MobileProductAdapter,
-  store: MobileKeyValueStore,
+  nativeBridge: NativeBridge,
   session: MobileSession,
 ): Promise<void> {
-  await store.set(mobileSessionStorageKey(adapter), stringify(session));
+  requireSessionProduct(adapter, session);
+  await writeCredential(
+    nativeBridge,
+    mobileSessionStorageKey(adapter),
+    stringify(session),
+  );
+}
+
+function requireSessionProduct(
+  adapter: MobileProductAdapter,
+  session: MobileSession,
+): void {
+  if (session.product !== adapter.product) {
+    throw new Error("Mobile session product does not match this app.");
+  }
 }
 
 function stringify(value: unknown): string {

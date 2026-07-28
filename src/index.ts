@@ -12,6 +12,7 @@ export type {
   MobileSessionUnlockMode,
   MobileSessionUnlockOptions,
   MobileLocalNotification,
+  MobilePersistentStore,
   MobileHostableProductKind,
   MobilePushNotification,
   MobilePushNotificationEventKind,
@@ -146,6 +147,7 @@ export {
 } from "./oidc.ts";
 export {
   beginMobileOidcSignIn,
+  clearMobileCredentials,
   clearMobileSession,
   completeMobileOidcSignIn,
   ensureFreshMobileSession,

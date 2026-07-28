@@ -11,6 +11,7 @@ const scheme = requireArg(args.scheme, "--scheme");
 const productName = requireArg(args.productName, "--product-name");
 const devPort = requireArg(args.devPort, "--dev-port");
 const strictNativeEnv = Boolean(args.strictNativeEnv);
+const mobileOnly = Boolean(args.mobileOnly);
 const remotePushPlugin = args.remotePushPlugin;
 
 const results = [];
@@ -70,7 +71,14 @@ const bridgeReachableCommands = [
 checkFile("package.json");
 checkFile("src-tauri/Cargo.toml");
 checkFile("src-tauri/tauri.conf.json");
-checkFile("src-tauri/capabilities/default.json");
+if (mobileOnly) {
+  expect(
+    !existsSync(path.join(appDir, "src-tauri/capabilities/default.json")),
+    "mobile-only shell has no desktop capability",
+  );
+} else {
+  checkFile("src-tauri/capabilities/default.json");
+}
 checkFile("src-tauri/capabilities/mobile.json");
 checkFile("src-tauri/Info.ios.plist");
 checkFile("vite.config.ts");
@@ -79,7 +87,9 @@ checkIconFiles();
 
 const packageJson = readJson("package.json");
 const tauriConfig = readJson("src-tauri/tauri.conf.json");
-const defaultCapability = readJson("src-tauri/capabilities/default.json");
+const defaultCapability = mobileOnly
+  ? {}
+  : readJson("src-tauri/capabilities/default.json");
 const mobileCapability = readJson("src-tauri/capabilities/mobile.json");
 const cargoToml = readText("src-tauri/Cargo.toml");
 const libRs = readText("src-tauri/src/lib.rs");
@@ -185,6 +195,13 @@ function checkPackage(pkg) {
   expectDevDependency(pkg, "@tauri-apps/cli");
   expectScript(pkg, "tauri:dev");
   expectScript(pkg, "tauri:build");
+  if (mobileOnly) {
+    expect(
+      !/\btauri\s+dev\b/.test(pkg.scripts?.["tauri:dev"] ?? "") &&
+        !/\btauri\s+build\b/.test(pkg.scripts?.["tauri:build"] ?? ""),
+      "mobile-only shell desktop scripts do not invoke Tauri desktop builds",
+    );
+  }
   expectScript(pkg, "tauri:android:init");
   expectScript(pkg, "tauri:android:dev");
   expectScript(pkg, "tauri:android:build");
@@ -285,7 +302,14 @@ function checkTauriConfig(config) {
     config.build?.frontendDist === "../dist",
     "tauri.conf frontendDist points at Vite dist",
   );
-  expect(config.bundle?.active === true, "tauri.conf bundle is enabled");
+  expect(
+    mobileOnly
+      ? config.bundle?.active === false
+      : config.bundle?.active === true,
+    mobileOnly
+      ? "mobile-only shell disables the desktop bundler"
+      : "tauri.conf bundle is enabled",
+  );
   const bundleIcons = new Set(config.bundle?.icon ?? []);
   for (const icon of requiredBundleIcons()) {
     expect(bundleIcons.has(icon), `tauri.conf bundle.icon includes ${icon}`);
@@ -309,8 +333,12 @@ function checkTauriConfig(config) {
     "mobile deep-link scheme is configured",
   );
   expect(
-    desktopSchemes.includes(scheme),
-    "desktop deep-link scheme is configured",
+    mobileOnly
+      ? desktopSchemes.length === 0
+      : desktopSchemes.includes(scheme),
+    mobileOnly
+      ? "mobile-only shell declares no desktop deep-link scheme"
+      : "desktop deep-link scheme is configured",
   );
 }
 
@@ -383,11 +411,13 @@ function checkCapabilities(defaultCapability, mobileCapability) {
     "stronghold:default",
   ];
 
-  for (const permission of desktopRequired) {
-    expect(
-      defaultPermissions.has(permission),
-      `desktop capability includes ${permission}`,
-    );
+  if (!mobileOnly) {
+    for (const permission of desktopRequired) {
+      expect(
+        defaultPermissions.has(permission),
+        `desktop capability includes ${permission}`,
+      );
+    }
   }
   expect(
     mobileCapability.platforms?.includes("iOS") &&
@@ -403,10 +433,13 @@ function checkCapabilities(defaultCapability, mobileCapability) {
 }
 
 function checkCapabilityScopes(defaultCapability, mobileCapability) {
-  for (const [label, capability] of [
-    ["desktop", defaultCapability],
-    ["mobile", mobileCapability],
-  ]) {
+  const capabilities = mobileOnly
+    ? [["mobile", mobileCapability]]
+    : [
+        ["desktop", defaultCapability],
+        ["mobile", mobileCapability],
+      ];
+  for (const [label, capability] of capabilities) {
     const entries = capabilityPermissionEntries(capability);
     for (const entry of entries) {
       if (!entry.scoped) continue;
@@ -444,23 +477,27 @@ function checkCapabilityPluginCoverage(
   const defaultPlugins = new Set(defaultEntries.map((entry) => entry.plugin));
   const mobilePlugins = new Set(mobileEntries.map((entry) => entry.plugin));
 
-  // A capability without platforms applies everywhere, so the desktop set is
-  // what covers the unconditional dependencies on every shipped platform.
-  expect(
-    defaultCapability.platforms === undefined,
-    "desktop capability applies to every shipped platform",
-  );
+  if (!mobileOnly) {
+    // A capability without platforms applies everywhere, so the desktop set is
+    // what covers the unconditional dependencies on every shipped platform.
+    expect(
+      defaultCapability.platforms === undefined,
+      "desktop capability applies to every shipped platform",
+    );
+  }
 
   for (const dependency of dependencies) {
-    if (dependency.mobileOnly) {
+    if (mobileOnly || dependency.mobileOnly) {
       expect(
         mobilePlugins.has(dependency.plugin),
         `mobile capability grants a permission for ${dependency.plugin}`,
       );
-      expect(
-        !defaultPlugins.has(dependency.plugin),
-        `desktop capability does not grant mobile-only ${dependency.plugin}`,
-      );
+      if (!mobileOnly) {
+        expect(
+          !defaultPlugins.has(dependency.plugin),
+          `desktop capability does not grant mobile-only ${dependency.plugin}`,
+        );
+      }
       continue;
     }
     expect(
@@ -475,10 +512,13 @@ function checkCapabilityPluginCoverage(
   }
 
   const declared = new Set(dependencies.map((dependency) => dependency.plugin));
-  for (const [label, plugins] of [
-    ["desktop", defaultPlugins],
-    ["mobile", mobilePlugins],
-  ]) {
+  const capabilityPlugins = mobileOnly
+    ? [["mobile", mobilePlugins]]
+    : [
+        ["desktop", defaultPlugins],
+        ["mobile", mobilePlugins],
+      ];
+  for (const [label, plugins] of capabilityPlugins) {
     for (const plugin of plugins) {
       // core is Tauri's built-in namespace, not a plugin crate dependency.
       if (plugin === "core") continue;
@@ -509,6 +549,7 @@ function checkBridgeReachableCommands(
   for (const command of bridgeReachableCommands) {
     if (!mobileKitTauriBridgeTs.includes(command.marker)) continue;
     for (const capability of command.capabilities) {
+      if (mobileOnly && capability === "default") continue;
       expect(
         identifiers[capability].has(command.permission),
         `${capability === "default" ? "desktop" : "mobile"} capability grants bridge-reachable ${command.permission}`,
@@ -1200,8 +1241,8 @@ function parseArgs(argv) {
     const key = arg
       .slice(2)
       .replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-    if (key === "strictNativeEnv") {
-      parsed.strictNativeEnv = true;
+    if (key === "strictNativeEnv" || key === "mobileOnly") {
+      parsed[key] = true;
       continue;
     }
     parsed[key] = argv[index + 1];

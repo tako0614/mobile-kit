@@ -75,6 +75,115 @@ test("mobile client controller connects, signs in, and loads home", async () => 
   });
 });
 
+test("mobile client rejects hosts missing adapter-required capabilities", async () => {
+  const controller = createMobileClientController({
+    adapter: {
+      ...adapter,
+      requiredHostCapabilities: [
+        "api.social.v1",
+        "client.yurume.messages.v1",
+      ],
+    },
+    nativeBridge: memoryBridge(),
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/.well-known/takos") {
+        return json({
+          product: "takos",
+          issuer: url.origin,
+          oidcClientId: "takos-mobile-host-example",
+          capabilities: ["api.social.v1"],
+        });
+      }
+      if (url.pathname === "/.well-known/takosumi") {
+        return json({ issuer: url.origin });
+      }
+      return new Response("", { status: 404 });
+    },
+  });
+
+  await controller.connectWithInput("https://host.example");
+
+  expect(controller.getState().discovery).toBeUndefined();
+  expect(controller.getState().status).toContain(
+    "client.yurume.messages.v1",
+  );
+});
+
+test("the latest connection attempt wins and aborts older discovery", async () => {
+  const firstStarted = deferred<void>();
+  const releaseFirst = deferred<void>();
+  let firstWasAborted = false;
+  const controller = createMobileClientController({
+    adapter,
+    nativeBridge: memoryBridge(),
+    fetch: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.hostname === "first.example") {
+        firstStarted.resolve();
+        await Promise.race([
+          releaseFirst.promise,
+          new Promise<void>((resolve) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                firstWasAborted = true;
+                resolve();
+              },
+              { once: true },
+            );
+          }),
+        ]);
+      }
+      if (url.pathname === "/.well-known/takos") {
+        return json({
+          product: "takos",
+          issuer: url.origin,
+          oidcClientId: "takos-mobile-host-example",
+        });
+      }
+      if (url.pathname === "/.well-known/takosumi") {
+        return json({ issuer: url.origin });
+      }
+      return new Response("", { status: 404 });
+    },
+  });
+
+  const first = controller.connectWithInput("https://first.example");
+  await firstStarted.promise;
+  await controller.connectWithInput("https://second.example");
+  releaseFirst.resolve();
+  await first;
+
+  expect(firstWasAborted).toBe(true);
+  expect(controller.getState().discovery?.hostUrl).toBe(
+    "https://second.example",
+  );
+});
+
+test("start can be retried after initialization fails", async () => {
+  let getLaunchPayloadCalls = 0;
+  let shouldFail = true;
+  const bridge = memoryBridge();
+  const controller = createMobileClientController({
+    adapter,
+    nativeBridge: {
+      ...bridge,
+      async getLaunchPayload() {
+        getLaunchPayloadCalls += 1;
+        if (shouldFail) throw new Error("native launch read failed");
+        return undefined;
+      },
+    },
+  });
+
+  await expect(controller.start()).rejects.toThrow("native launch read failed");
+  shouldFail = false;
+  await controller.start();
+
+  expect(getLaunchPayloadCalls).toBe(2);
+});
+
 test("mobile client controller loads recent hosts and reconnects from them", async () => {
   const bridge = memoryBridge();
   await bridge.storage?.set(
@@ -380,7 +489,7 @@ test("mobile client does not persist a token refresh that finishes after sign ou
   ).toBeUndefined();
 });
 
-test("mobile client controller opens mobile route launch payloads on the current host", async () => {
+test("mobile client fails closed when no authenticated route handoff is configured", async () => {
   const bridge = memoryBridge();
   await bridge.storage?.set(
     mobileSessionStorageKey(adapter),
@@ -402,18 +511,24 @@ test("mobile client controller opens mobile route launch payloads on the current
   await controller.start();
   await controller.handleLaunchPayload("takos://open?path=%2Fchat");
 
-  expect(bridge.opened).toEqual(["https://host.example/chat"]);
-  expect(controller.getState().pendingRoute).toBeUndefined();
-  expect(controller.getState().status).toBe("リクエストされた画面を開きました。");
+  expect(bridge.opened).toEqual([]);
+  expect(controller.getState().pendingRoute).toEqual({ path: "/chat" });
+  expect(controller.getState().status).toBe(
+    "Mobile host route requires an authenticated handoff.",
+  );
 });
 
 test("mobile client controller keeps mobile routes pending until sign-in", async () => {
   const bridge = memoryBridge();
+  const routeHandoffs: unknown[] = [];
   const controller = createMobileClientController({
     adapter,
     nativeBridge: bridge,
     fetch: fixtureFetch(),
     loadHome: async (session) => ({ title: session.hostUrl }),
+    openHostRoute: async (input) => {
+      routeHandoffs.push(input);
+    },
   });
 
   await controller.handleLaunchPayload(
@@ -439,17 +554,27 @@ test("mobile client controller keeps mobile routes pending until sign-in", async
 
   expect(controller.getState().session?.accessToken).toBe("access-1");
   expect(controller.getState().pendingRoute).toBeUndefined();
-  expect(bridge.opened.at(-1)).toBe("https://host.example/apps");
+  expect(routeHandoffs).toEqual([
+    {
+      session: controller.getState().session,
+      path: "/apps",
+      url: "https://host.example/apps",
+    },
+  ]);
   expect(controller.getState().status).toBe("リクエストされた画面を開きました。");
 });
 
 test("mobile client controller treats hosted route URLs as route handoffs", async () => {
   const bridge = memoryBridge();
+  const routeHandoffs: unknown[] = [];
   const controller = createMobileClientController({
     adapter,
     nativeBridge: bridge,
     fetch: fixtureFetch(),
     loadHome: async (session) => ({ title: session.hostUrl }),
+    openHostRoute: async (input) => {
+      routeHandoffs.push(input);
+    },
   });
 
   await controller.handleLaunchPayload("https://host.example/chat?thread=1");
@@ -473,7 +598,13 @@ test("mobile client controller treats hosted route URLs as route handoffs", asyn
 
   expect(controller.getState().session?.accessToken).toBe("access-1");
   expect(controller.getState().pendingRoute).toBeUndefined();
-  expect(bridge.opened.at(-1)).toBe("https://host.example/chat?thread=1");
+  expect(routeHandoffs).toEqual([
+    {
+      session: controller.getState().session,
+      path: "/chat?thread=1",
+      url: "https://host.example/chat?thread=1",
+    },
+  ]);
   expect(controller.getState().status).toBe("リクエストされた画面を開きました。");
 });
 
@@ -694,7 +825,7 @@ test("mobile client controller keeps Host Center setup handoff state", async () 
     setupTicket: "ticket-1",
   });
   expect(controller.getState().status).toBe(
-    "Takos hostが見つかりました。 Host Center handoff received.",
+    "Takos hostが見つかりました。 Unverified setup reference received.",
   );
 });
 
