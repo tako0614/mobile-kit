@@ -12,6 +12,32 @@ shell.
 
 The package intentionally does not own native push, calls, or product UI. Those belong in the product mobile shell or native plugin layer and should call this package for host and identity setup.
 
+## What it gives you
+
+- host URL normalization, discovery, and capability lookup
+- OIDC PKCE authorization URLs, token exchange, and session storage through the
+  native bridge
+- a recent-host list so users reconnect without retyping URLs
+- product mobile route parsing for deep links and push taps
+- Takosumi App Handoff / Host Center link building
+- a shared shell UI for connection, auth, session, and recent hosts
+- a shared Tauri mobile doctor your product shell can run from its own package
+
+The full list is under [Current Surface](#current-surface).
+
+## Getting started
+
+Add the package from an adjacent checkout and run its checks:
+
+```sh
+bun install
+bun run check
+bun run test
+```
+
+From a product mobile package, run the shared doctor as shown in
+[Checks](#checks).
+
 ## Host-First Product Surface Rule
 
 Product mobile shells should not rebuild every host screen as native UI. The
