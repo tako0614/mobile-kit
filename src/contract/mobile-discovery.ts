@@ -2,12 +2,11 @@
 //
 // This is the vendored mirror of the discovery half of the mobile wire
 // contract owned by `takosumi-contract`. mobile-kit ships as a standalone repo
-// and cannot reach the owning module through a tsconfig path alias. The
-// ecosystem root wire-contract gate therefore verifies that mirrored members
-// only narrow the owning contract, exercises the shipped requirements and
-// fixtures, and compares producer/consumer product tokens. Treat uncoordinated
-// hand-edits here as drift: update the owning wire surface first, then this
-// mirror and its conformance fixtures together.
+// and cannot reach the owning module through a tsconfig path alias. No
+// ecosystem-level gate currently verifies that mirrored members only narrow
+// the owning contract — that check is a known gap, so uncoordinated
+// hand-edits here are silent drift: update the owning wire surface first,
+// then this mirror and its conformance fixtures together.
 //
 // The point of keeping decoders, requirements and fixtures in ONE module is
 // that a mobile shell cannot read a host document without also importing the

@@ -1,11 +1,11 @@
-# Takosumi Mobile Kit
+# mobile-kit
 
-Takosumi Mobile Kit is the product-agnostic mobile foundation for clients backed by a Takosumi-managed host.
+mobile-kit is the product-agnostic mobile foundation for clients backed by a Takosumi-managed host.
 
 It consumes the generic Takosumi App Handoff Protocol; it does not define a mobile-only install protocol. Host discovery, connection URLs, Host Center links, and OIDC PKCE helpers live in Takosumi-owned code so product mobile shells can stay thin and mostly identical. The kit does not know product names; a product is a validated key supplied by the app adapter.
 
-In this package, "shared" means reusable mobile foundation owned by Takosumi
-Mobile Kit. It does not mean product shells share product code directly.
+In this package, "shared" means reusable mobile foundation owned by
+mobile-kit. It does not mean product shells share product code directly.
 Mobile clients should depend on the same typed foundation seams, then keep
 app-specific API clients and native plugin choices inside their own product
 shell.
@@ -57,8 +57,8 @@ default path is:
 - when a behavior is product-specific, keep only the typed host API client in
   that product shell and fall back to host handoff for the full workflow
 
-This keeps product mobile code structurally similar without forcing Takosumi
-Mobile Kit to know product nouns or duplicating complete web screens in native
+This keeps product mobile code structurally similar without forcing
+mobile-kit to know product nouns or duplicating complete web screens in native
 UI.
 
 ## Current Surface
@@ -111,7 +111,7 @@ UI.
   Stronghold or platform keychain adapter.
 - Provide first-run action metadata shared by product mobile shells.
 - Define the native bridge contract for launch payloads, in-app browser handoff, persistent storage, QR scanning, local notifications, biometric auth, remote push, call intents, and plain-text clipboard writes.
-- Provide a typed adapter helper that lets product shells pass Tauri plugin functions without making Takosumi Mobile Kit depend on Tauri packages directly.
+- Provide a typed adapter helper that lets product shells pass Tauri plugin functions without making mobile-kit depend on Tauri packages directly.
 - Provide a typed Tauri Stronghold secure-store helper that product shells can
   wire to `@tauri-apps/plugin-stronghold` without adding Tauri packages as kit
   dependencies.
@@ -123,7 +123,7 @@ UI.
   sources, provider unregistration, and opener-backed call intents. These
   helpers normalize product-local plugin output into the shared native bridge
   contract; they do not make remote push or incoming-call support part of the
-  Takosumi Mobile Kit runtime.
+  mobile-kit runtime.
 - Provide a product-agnostic `shareMobileUrl` helper that prefers Web Share,
   falls back to the native bridge's plain-text clipboard write seam, then to the
   browser clipboard when available.
@@ -135,7 +135,7 @@ UI.
 - Provide a typed adapter shape for product-local mobile-push plugins
   (`requestPermission()`, `getToken()`, optional `unregister()`, notification
   events, and registration-refresh events) without making a native package a
-  Takosumi Mobile Kit dependency. The generic `token` field is an opaque
+  mobile-kit dependency. The generic `token` field is an opaque
   cross-provider value; it can hold an APNs device token or an FCM Firebase
   Installation ID (FID).
 - Provide a typed Tauri mobile product bridge factory that wires the common
@@ -181,12 +181,15 @@ UI.
 
 Native implementations are intentionally product-local. Product apps replace the browser bridge with a Tauri/plugin-backed bridge without changing Takosumi host discovery or OIDC helpers. As of the current Tauri v2 official plugin surface we rely on `@tauri-apps/plugin-notification` for local notifications, not APNs/FCM remote push; remote push registration is therefore an optional typed adapter that a product shell backs with a platform-specific implementation. Call intents are also optional: the shared helper can use Tauri opener as a standard in-app-browser fallback, while true incoming-call UI remains product/native plugin work. The controller can pass a native provider registration identifier to a product-owned callback, unregister it on session teardown, and register the opaque value through the portable Notification Pusher contract; the host implementation remains product-owned. Secure token storage is also an optional typed adapter: products can use the kit's Tauri mobile product bridge / Stronghold helper or provide another platform keychain implementation as `NativeBridge.secureStore` without making this package depend on native plugin packages. The included Stronghold password helpers remove the checked-in static development password. Product shells can migrate a legacy product-scoped Tauri Store seed into native secure storage; the plaintext migration value is retained only until a later app start reads the same seed back from native storage, then it is deleted. Native store failure never silently falls back to plaintext. Biometric auth is treated as an unlock gate, not as secret derivation, because the Tauri biometric plugin authenticates the user but does not return password material.
 
-The community `tauri-plugin-mobile-push@0.1.4` adapter remains available for
-experimentation, but it is not a GA implementation: its locked Rust command
-surface does not provide a verified Android token path, listener registration
-is incomplete, and its platform event lifecycle is not sufficient for a
-shipping claim. Product shells must keep remote push feature-off until they
-provide a product-owned native adapter, delivery backend, token lifecycle, and
+The community `tauri-plugin-mobile-push@0.1.4` adapter is not a shipping
+path: its locked Rust command surface does not provide a verified Android
+token path, listener registration is incomplete, and its platform event
+lifecycle is not sufficient for a shipping claim. The shared doctor rejects
+it — a shell enabling remote push must vendor the product-owned
+`src-tauri/plugins/mobile-push` plugin instead, and the doctor fails if it
+finds the community JavaScript package or the `0.1.4` crates.io dependency.
+Product shells must keep remote push feature-off until they provide that
+product-owned native adapter, a delivery backend, a token lifecycle, and
 physical-device evidence. The shared typed adapter is an integration seam, not
 readiness evidence.
 
@@ -215,29 +218,58 @@ holding the document types, the decoders, the requirements, and the fixtures:
 - **Fixtures are shared.** Consumer tests build host responses from
   `MOBILE_PRODUCT_WELL_KNOWN_FIXTURES` instead of hand-written literals, so a
   test cannot pin a shape the requirements reject.
-- **Known defects are shipped as a corpus.** `MOBILE_WIRE_DEFECT_CORPUS` records
-  the real non-conformant producer documents and the requirements each must
-  violate, so the checks stay proven rather than merely present.
+- **Known defects are checked against a corpus.** The kit ships the
+  `MobileWireDefectCase` shape and `checkMobileWireDefectCorpus`; the corpus
+  itself lives in the suites that record real producer output, because the kit
+  knows no product nouns and cannot ship product-named documents. This repo's
+  `tests/src/wire_conformance_test.ts` keeps the two known cases, so the
+  checks stay proven rather than merely present.
 
-A producer repo runs the same comparison against its own real output:
+A producer repo runs the same comparison against its own served output:
 
 ```ts
-import { assertMobileHostWire } from "@takosjp/mobile-kit";
+import {
+  assertMobileHostWire,
+  fetchOptionalWire,
+  fetchWire,
+  HOST_CAPABILITIES_DECODER,
+  HOST_CAPABILITIES_PATH,
+  MOBILE_PRODUCT_WELL_KNOWN_DECODER,
+  mobileProductWellKnownPath,
+  TAKOSUMI_WELL_KNOWN_DECODER,
+  TAKOSUMI_WELL_KNOWN_PATH,
+} from "@takosjp/mobile-kit";
 
 // productKey is the token this host bakes into its own well-known document.
+const hostUrl = "https://host.example";
 assertMobileHostWire({
-  hostUrl: "https://host.example",
+  hostUrl,
   expectedProduct: productKey,
-  productWellKnown: createProductWellKnown("https://host.example"),
-  capabilities: createProductCapabilities("https://host.example"),
+  productWellKnown: await fetchWire(
+    fetch,
+    `${hostUrl}${mobileProductWellKnownPath(productKey)}`,
+    MOBILE_PRODUCT_WELL_KNOWN_DECODER,
+  ),
+  takosumiWellKnown: await fetchOptionalWire(
+    fetch,
+    `${hostUrl}${TAKOSUMI_WELL_KNOWN_PATH}`,
+    TAKOSUMI_WELL_KNOWN_DECODER,
+  ),
+  capabilities: await fetchOptionalWire(
+    fetch,
+    `${hostUrl}${HOST_CAPABILITIES_PATH}`,
+    HOST_CAPABILITIES_DECODER,
+  ),
 });
 ```
 
 This module is the vendored mirror of the discovery half of the wire contract
-owned by `takosumi-contract`; the ecosystem root wire-contract gate verifies
-that the mirror only narrows the owning contract and exercises the shared
-requirements, fixtures, and producer/consumer product-token agreement. Change
-the owning wire surface first, then update the mirror and its fixtures together.
+owned by `takosumi-contract`. No ecosystem-level gate currently verifies that
+the mirror only narrows the owning contract — that check is a known gap, so
+the mirror and the owner can drift silently. Until such a gate exists, change
+the owning wire surface first, then update the mirror and its fixtures
+together, and keep this repo's conformance tests green as the only automated
+proof that the shared requirements still hold.
 
 ## Checks
 
@@ -256,31 +288,31 @@ bun ../mobile-kit/scripts/check-tauri-mobile.mjs \
   --dev-port 1420
 ```
 
-For legacy/community adapter experiments only, add:
+To have the doctor verify the product-owned remote-push plugin wiring, add:
 
 ```sh
   --remote-push-plugin mobile-push
 ```
 
-The doctor then checks the community dependency, capability, and Rust plugin
-registration, but passing those static checks is not a GA claim. A shipping
-product should instead use its release-status and evidence gates to require a
-product-owned native plugin, delivery backend, provider-error cleanup, token
-replacement, and device evidence.
+The doctor then checks the product-owned plugin's capability, Rust
+registration, and native sources, and fails if the community
+`tauri-plugin-mobile-push` package is present instead. Passing those static
+checks is still not a GA claim. A shipping product should use its
+release-status and evidence gates to require the delivery backend,
+provider-error cleanup, token replacement, and physical-device evidence.
 
-At the ecosystem root, `bun run check:mobile-apps` remains the normal shared
-foundation and product web-surface gate. `bun run check:mobile-apps:native` is
-the stricter native release-readiness gate: it runs each product's
-`mobile:native-release-check` and turns native toolchain/generated-project
-warnings into failures. `bun run check:mobile-apps:release` adds product release
-evidence checks for signed artifacts, store upload references, store
-screenshots, device smoke, native security, mobile OIDC integration, and remote
-push. `bun run
-status:mobile-apps:release` reports implementation, environment, operator, and
-evidence blocker categories without failing, which is useful while the apps
-are not yet store-ready. Keep these gates separate so day-to-day mobile shell
-work can stay green before store/team-specific native projects, SDKs, and
-release evidence are available.
+Each product shell runs the same gates from its own package directory.
+`bun run mobile:native-release-check` is the native release-readiness gate:
+it checks toolchain and generated-project wiring and turns warnings into
+failures. `bun run mobile:release-evidence-check` verifies product release
+evidence for signed artifacts, store upload references, store screenshots,
+device smoke, native security, mobile OIDC integration, and remote push.
+`bun run mobile:release-status` reports implementation, environment,
+operator, and evidence blocker categories without failing, which is useful
+while the apps are not yet store-ready. `bun run release:check` runs the
+full release gate. Keep these gates separate so day-to-day mobile shell work
+can stay green before store/team-specific native projects, SDKs, and release
+evidence are available.
 
 Each product can additionally expose a repository-only release gate by running
 the status reporter with `--skip-toolchain-probe --fail-on-repo-blockers`. That
