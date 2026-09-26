@@ -36,7 +36,7 @@ export interface MobileProductAdapter {
   readonly hostCenterLabel?: string;
   /**
    * Explicit operator dashboard install endpoint. The shared mobile kit never
-   * assumes the official hosted Takosumi Cloud deployment.
+   * assumes the official Takosumi Hosted deployment.
    */
   readonly hostCenterUrl?: string;
   readonly hostCenterProduct?: MobileHostableProductKind;
