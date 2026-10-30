@@ -21,6 +21,7 @@ import {
   ensureFreshMobileSession,
   isOidcCallbackPayload,
   loadMobileSession,
+  MobileSessionRefreshError,
   mobileAuthRequestStorageKey,
   revokeMobileHostSession,
   revokeMobileOidcSession,
@@ -281,6 +282,13 @@ export function createMobileClientController<Home = unknown>(
       if (session !== next) await persistRefreshedSession(session);
       return session;
     } catch (error) {
+      if (error instanceof MobileSessionRefreshError && !error.rejected) {
+        // Transient: keep the saved session; the user can retry.
+        if (expectedEpoch === sessionLifecycleEpoch) {
+          publish({ status: mobileErrorMessage(error, copy.signInFailedStatus) });
+        }
+        throw error;
+      }
       await clearSessionAfterRefreshFailure(error, expectedEpoch, next);
       throw error;
     }

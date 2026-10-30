@@ -118,6 +118,19 @@ export interface RevokeMobileHostSessionInput {
   readonly fetch?: FetchLike;
 }
 
+/** A refresh-token grant failed; `rejected` means the issuer refused the grant. */
+export class MobileSessionRefreshError extends Error {
+  readonly status: number;
+  readonly rejected: boolean;
+
+  constructor(status: number, rejected: boolean) {
+    super(`Mobile session refresh failed: ${status}`);
+    this.name = "MobileSessionRefreshError";
+    this.status = status;
+    this.rejected = rejected;
+  }
+}
+
 export function mobileAuthRequestStorageKey(
   adapter: MobileProductAdapter,
 ): string {
@@ -198,6 +211,7 @@ export async function completeMobileOidcSignIn(
     input.callbackUrl,
     request.state,
     request.redirectUri,
+    request.oidcIssuer,
   );
   const metadata = await fetchOidcMetadata({
     issuer: request.oidcIssuer,
@@ -449,14 +463,17 @@ export async function refreshMobileSession(
     }),
   });
   if (!response.ok) {
-    if (input.persistSession !== false) {
+    // Only an authorization-server refusal ends the session; a transient
+    // failure (5xx, rate limit) keeps it for a later retry.
+    const rejected = response.status === 400 || response.status === 401;
+    if (rejected && input.persistSession !== false) {
       await removeMobileAccountSessionFor({
         adapter: input.adapter,
         nativeBridge: input.nativeBridge,
         session: input.session,
       });
     }
-    throw new Error(`Mobile session refresh failed: ${response.status}`);
+    throw new MobileSessionRefreshError(response.status, rejected);
   }
   const token = decodeOidcTokenResponse(
     await response.json(),
@@ -468,13 +485,15 @@ export async function refreshMobileSession(
     now: input.now,
   });
   if (input.persistSession !== false) {
-    // A rotation keeps the account it belongs to; it becomes the active one
-    // only when no account is active, never by displacing another.
+    // A rotation is saved only to an account that is still saved, so a refresh
+    // finishing after sign-out cannot bring the account back. It never
+    // displaces the active account.
     await saveMobileAccountSession({
       adapter: input.adapter,
       nativeBridge: input.nativeBridge,
       session,
       activate: "if-none",
+      onlyIfExisting: true,
     });
   }
   return session;

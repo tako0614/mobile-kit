@@ -501,23 +501,25 @@ test("browser consumes a legacy plaintext session once without new fallback writ
 
 test("refreshMobileSession rotates an expired mobile session", async () => {
   const bridge = memoryBridge();
+  const expired = {
+    hostUrl: "https://host.example",
+    product: "takos" as const,
+    oidcIssuer: "https://host.example",
+    oidcClientId: "takos-mobile-host-example",
+    accessToken: "expired-access",
+    tokenType: "Bearer",
+    refreshToken: "refresh-1",
+    productEndpoints: {
+      notificationPushers: "/api/notifications/pushers",
+    },
+    createdAt: "2026-06-30T00:00:00.000Z",
+    expiresAt: "2026-06-30T00:30:00.000Z",
+  };
+  await persistMobileSession({ adapter, nativeBridge: bridge, session: expired });
   const session = await refreshMobileSession({
     adapter,
     nativeBridge: bridge,
-    session: {
-      hostUrl: "https://host.example",
-      product: "takos",
-      oidcIssuer: "https://host.example",
-      oidcClientId: "takos-mobile-host-example",
-      accessToken: "expired-access",
-      tokenType: "Bearer",
-      refreshToken: "refresh-1",
-      productEndpoints: {
-        notificationPushers: "/api/notifications/pushers",
-      },
-      createdAt: "2026-06-30T00:00:00.000Z",
-      expiresAt: "2026-06-30T00:30:00.000Z",
-    },
+    session: expired,
     fetch: oidcFetch(),
     now: () => new Date("2026-06-30T01:00:00.000Z"),
   });
@@ -899,4 +901,37 @@ test("revokeMobileOidcSession never sends tokens off the issuer or for exchanged
     }),
   ).toBe(false);
   expect(sent).toEqual([]);
+});
+
+test("a refresh never revives a signed-out account and only an issuer refusal drops one", async () => {
+  const base = {
+    hostUrl: "https://host.example",
+    product: "takos" as const,
+    oidcIssuer: "https://host.example",
+    oidcClientId: "takos-mobile-host-example",
+    accessToken: "expired-access",
+    tokenType: "Bearer",
+    refreshToken: "refresh-1",
+    createdAt: "2026-06-30T00:00:00.000Z",
+    expiresAt: "2026-06-30T00:30:00.000Z",
+  };
+  const signedOut = memoryBridge();
+  await refreshMobileSession({ adapter, nativeBridge: signedOut, session: base, fetch: oidcFetch() });
+  expect(await loadMobileSession({ adapter, nativeBridge: signedOut })).toBeUndefined();
+
+  const failing = (status: number): FetchLike => async (input, init) =>
+    String(input).endsWith("/oauth/token") && init?.method === "POST"
+      ? new Response(null, { status })
+      : oidcFetch()(input, init);
+  const transient = memoryBridge();
+  await persistMobileSession({ adapter, nativeBridge: transient, session: base });
+  await expect(
+    refreshMobileSession({ adapter, nativeBridge: transient, session: base, fetch: failing(503) }),
+  ).rejects.toMatchObject({ name: "MobileSessionRefreshError", status: 503, rejected: false });
+  expect((await loadMobileSession({ adapter, nativeBridge: transient }))?.accessToken).toBe("expired-access");
+
+  await expect(
+    refreshMobileSession({ adapter, nativeBridge: transient, session: base, fetch: failing(400) }),
+  ).rejects.toMatchObject({ status: 400, rejected: true });
+  expect(await loadMobileSession({ adapter, nativeBridge: transient })).toBeUndefined();
 });

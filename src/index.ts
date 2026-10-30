@@ -176,6 +176,7 @@ export {
   ensureFreshMobileSession,
   isOidcCallbackPayload,
   loadMobileSession,
+  MobileSessionRefreshError,
   mobileAuthRequestStorageKey,
   mobileSessionStorageKey,
   persistMobileSession,

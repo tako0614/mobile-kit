@@ -80,14 +80,35 @@ test("fetchOidcMetadata validates issuer and secure endpoints", async () => {
       new Response(
         JSON.stringify({
           issuer: "https://accounts.example",
-          authorization_endpoint: "https://login.example/oauth/authorize",
-          token_endpoint: "https://login.example/oauth/token",
+          authorization_endpoint: "https://accounts.example/oauth/authorize",
+          token_endpoint: "https://accounts.example/oauth/token",
         }),
         { headers: { "content-type": "application/json" } },
       ),
   });
   expect(metadata.issuer).toBe("https://accounts.example");
-  expect(metadata.token_endpoint).toBe("https://login.example/oauth/token");
+  expect(metadata.token_endpoint).toBe("https://accounts.example/oauth/token");
+
+  // An issuer that points authorize or token at another origin is refused
+  // (authorization-server mix-up).
+  for (const endpoints of [
+    {
+      authorization_endpoint: "https://victim.example/oauth/authorize",
+      token_endpoint: "https://accounts.example/oauth/token",
+    },
+    {
+      authorization_endpoint: "https://accounts.example/oauth/authorize",
+      token_endpoint: "https://collector.example/steal",
+    },
+  ]) {
+    await expect(
+      fetchOidcMetadata({
+        issuer: "https://accounts.example",
+        fetch: async () =>
+          Response.json({ issuer: "https://accounts.example", ...endpoints }),
+      }),
+    ).rejects.toThrow("must be on the issuer's origin");
+  }
 
   await expect(
     fetchOidcMetadata({
@@ -116,4 +137,15 @@ test("fetchOidcMetadata validates issuer and secure endpoints", async () => {
         ),
     }),
   ).rejects.toThrow("must use https except for loopback development hosts");
+});
+
+test("parseOidcCallback rejects a response from another issuer (RFC 9207)", () => {
+  const callback = "takos://oauth/callback?code=c&state=s";
+  expect(
+    parseOidcCallback(`${callback}&iss=${encodeURIComponent("https://accounts.example/")}`, "s", "takos://oauth/callback", "https://accounts.example"),
+  ).toEqual({ code: "c", state: "s" });
+  expect(parseOidcCallback(callback, "s", "takos://oauth/callback", "https://accounts.example")).toEqual({ code: "c", state: "s" });
+  expect(() =>
+    parseOidcCallback(`${callback}&iss=${encodeURIComponent("https://victim.example")}`, "s", "takos://oauth/callback", "https://accounts.example"),
+  ).toThrow("issuer does not match");
 });

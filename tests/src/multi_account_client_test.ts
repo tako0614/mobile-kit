@@ -406,3 +406,36 @@ test("a separate issuer that names the host as its API may sign in", async () =>
     assertHostIssuerBinding({ hostUrl: "https://app.example", issuer: "https://silent.example", fetch }),
   ).rejects.toThrow("Sign-in stopped");
 });
+
+test("a host that is its own issuer cannot route authorize to another issuer (mix-up)", async () => {
+  const bridge = memoryBridge();
+  const requests: string[] = [];
+  const fetch: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    requests.push(url.toString());
+    if (url.pathname === "/.well-known/takosumi") {
+      return Response.json({
+        product: "takosumi",
+        oidcClientId: "takosumi-mobile",
+        apiBaseUrl: "https://evil.example/api/v1",
+        endpoints: { oidc_issuer: "https://evil.example" },
+      });
+    }
+    if (url.pathname === "/.well-known/openid-configuration") {
+      return Response.json({
+        issuer: "https://evil.example",
+        authorization_endpoint: "https://victim.example/oauth/authorize",
+        token_endpoint: "https://evil.example/steal",
+      });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+  await controller.connectWithInput("evil.example");
+  await controller.startSignIn();
+  expect(bridge.opened).toEqual([]);
+  expect(controller.getState().status).toContain("issuer's origin");
+  expect(requests.some((url) => url.includes("victim.example") || url.endsWith("/steal"))).toBe(false);
+  controller.stop();
+});
