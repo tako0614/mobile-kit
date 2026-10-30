@@ -266,3 +266,64 @@ test("a product can accept invite codes in routes, never on OAuth paths", () => 
     ).toThrow("must not carry credentials");
   }
 });
+
+test("parseMobileRouteInput folds or refuses non-ASCII parameter names", () => {
+  const adapter = { mobileScheme: "yurucommu", product: "yurucommu" };
+  const open = (path: string) =>
+    parseMobileRouteInput(`yurucommu://open?path=${encodeURIComponent(path)}`, adapter);
+  // Full-width letters fold to ASCII (NFKC) and are then matched.
+  expect(() => open("/?\uff54\uff4f\uff4b\uff45\uff4e=t")).toThrow("must not carry credentials");
+  expect(() => open("/#\uff43\uff4f\uff44\uff45=c")).toThrow("must not carry credentials");
+  // Other scripts could spell a credential in lookalike letters.
+  for (const path of [
+    "/?t\u043eken=t", // Cyrillic o
+    "/?\u0430ccess_token=t", // Cyrillic a
+    "/?\u540d\u524d=x",
+    "/x;s\u0435ssionid=s", // Cyrillic e in a path parameter
+  ]) {
+    expect(() => open(path), path).toThrow("must be ASCII");
+  }
+  // Non-ASCII values and names without a value are fine.
+  expect(open("/search?q=\u691c\u7d22")?.path).toBe("/search?q=\u691c\u7d22");
+  expect(open("/docs#\u5c0e\u5165")?.path).toBe("/docs#\u5c0e\u5165");
+});
+
+test("parseMobileRouteInput reads names inside trailing brackets", () => {
+  const adapter = { mobileScheme: "yurucommu", product: "yurucommu" };
+  const open = (path: string) =>
+    parseMobileRouteInput(`yurucommu://open?path=${encodeURIComponent(path)}`, adapter);
+  for (const path of [
+    "/?token[]=t",
+    "/?access_token[0]=t",
+    "/?auth[token]=t",
+    "/?user[password]=p",
+    "/?session[][id]=s",
+    "/#/cb?code[]=c",
+  ]) {
+    expect(() => open(path), path).toThrow("must not carry credentials");
+  }
+  expect(open("/?filter[status]=open&ids[]=1")?.path).toBe(
+    "/?filter[status]=open&ids[]=1",
+  );
+});
+
+test("an invite-code product still refuses code under an OAuth fragment route", () => {
+  const adapter = {
+    mobileScheme: "yurucommu",
+    product: "yurucommu",
+    allowRouteCodeParameter: true,
+  };
+  for (const path of [
+    "/join#/oauth/callback?code=x",
+    "/#/auth/callback?code=x",
+    "/join?code=x#/oauth/cb",
+  ]) {
+    expect(
+      () => parseMobileRouteInput(`yurucommu://open?path=${encodeURIComponent(path)}`, adapter),
+      path,
+    ).toThrow("must not carry credentials");
+  }
+  expect(
+    parseMobileRouteInput("yurucommu://open?path=%2Fjoin%3Fcode%3Dx%23%2Fwelcome", adapter)?.path,
+  ).toBe("/join?code=x#/welcome");
+});
