@@ -128,6 +128,22 @@ UI.
 - Keep route deep links pending across sign-in when the payload includes
   `host_url`, then open the requested host route after the mobile session is
   established.
+- Refuse route links before they are opened when the path would leave the host
+  (`//host`, `/\host`, other schemes), contains whitespace or control
+  characters, is longer than 2,048 characters, or carries a credential-named
+  query or fragment parameter (`code`, `token`, `access_token`, `id_token`,
+  `session`, `password`, …).
+- A connect link for the host already in use (signed in or locked, and not
+  while adding an account) just opens the app: no "another host" prompt and no
+  discovery request. A connect link for another host is shown as discovered,
+  and switching or signing in is the user's choice. Once the user signs in to
+  (or switches to) that host, it is no longer offered as another host.
+- `MobileProductAdapter.confirmRouteAccountSwitch`: a route link for another
+  saved host no longer switches the active account by itself. The host is shown
+  as discovered (with "switch to the saved account" in the shared shell), the
+  route stays pending, and it opens once the user switches or signs in.
+  Dismissing that prompt drops the pending route. Without the flag a route link
+  for a saved host switches to it directly (Takosumi Mobile's behavior).
 - Provide a small host API helper for registering product-neutral HTTP pushers
   through the current mobile session bearer token. It uses the host-advertised
   `notificationPushers` endpoint, falling back to

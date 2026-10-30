@@ -456,3 +456,149 @@ test("a host-API shell refuses a callback that does not name its issuer", async 
   expect(requests.some((r) => r.url.endsWith("/oauth/token"))).toBe(false);
   controller.stop();
 });
+
+test("a connect link for the host already in use just opens without a prompt", async () => {
+  const bridge = memoryBridge();
+  const { fetch, requests } = instances();
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  const before = requests.length;
+
+  // Takosumi fills `{origin}` URL-encoded into the trusted template.
+  await controller.handleLaunchPayload(
+    "takosumi://connect?host_url=https%3A%2F%2Fa.example&product=takosumi",
+  );
+  expect(controller.getState().discovery).toBeUndefined();
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().status).toBe("このTakosumiにはすでに接続しています。");
+  expect(requests.length).toBe(before);
+
+  // Adding a second account on the same host is still possible on purpose.
+  controller.addAccount();
+  await controller.connectWithInput("a.example");
+  expect(controller.getState().discovery?.hostUrl).toBe("https://a.example");
+  controller.stop();
+});
+
+test("a connect link for the locked host leaves the lock in place without a prompt", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  await bridge.secureStore!.set(
+    mobileSessionStorageKey(adapter),
+    JSON.stringify({
+      hostUrl: "https://a.example",
+      product: "takosumi",
+      accessToken: "a-access-legacy",
+      tokenType: "Bearer",
+      createdAt: "2026-10-29T00:00:00.000Z",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  );
+  const controller = createMobileClientController({
+    adapter,
+    nativeBridge: bridge,
+    fetch,
+    sessionUnlock: { restoreMode: "required" },
+  });
+  await controller.start();
+  expect(controller.getState().lockedSession?.hostUrl).toBe("https://a.example");
+  await controller.handleLaunchPayload("takosumi://connect?host_url=https%3A%2F%2Fa.example");
+  expect(controller.getState().discovery).toBeUndefined();
+  expect(controller.getState().lockedSession?.hostUrl).toBe("https://a.example");
+  controller.stop();
+});
+
+test("with confirmRouteAccountSwitch a route link for another saved instance asks before switching", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  const opened: string[] = [];
+  const controller = createMobileClientController({
+    adapter: { ...adapter, confirmRouteAccountSwitch: true },
+    nativeBridge: bridge,
+    fetch,
+    openHostRoute: async ({ url }) => void opened.push(url),
+  });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  controller.addAccount();
+  await controller.connectWithInput("b.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+
+  await controller.handleLaunchPayload("https://a.example/runs/run_1");
+  // Nothing switched: B stays usable and A is offered.
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+  expect(controller.getState().discovery?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().pendingRoute?.path).toBe("/runs/run_1");
+  expect(opened).toEqual([]);
+
+  // Choosing the saved account opens the route on it.
+  const accountA = controller.getState().accounts.find((a) => a.hostUrl === "https://a.example")!;
+  await controller.switchAccount(accountA.id);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(opened).toEqual(["https://a.example/runs/run_1"]);
+  expect(controller.getState().pendingRoute).toBeUndefined();
+  controller.stop();
+});
+
+test("dismissing the prompt drops the pending route", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  const opened: string[] = [];
+  const controller = createMobileClientController({
+    adapter: { ...adapter, confirmRouteAccountSwitch: true },
+    nativeBridge: bridge,
+    fetch,
+    openHostRoute: async ({ url }) => void opened.push(url),
+  });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  controller.addAccount();
+  await controller.connectWithInput("b.example");
+  await signInVia(controller, bridge);
+
+  await controller.handleLaunchPayload(
+    "takosumi://open?path=%2Fapps&host_url=https%3A%2F%2Fa.example",
+  );
+  expect(controller.getState().pendingRoute?.path).toBe("/apps");
+  controller.cancelAddAccount();
+  expect(controller.getState().discovery).toBeUndefined();
+  expect(controller.getState().pendingRoute).toBeUndefined();
+
+  const accountA = controller.getState().accounts.find((a) => a.hostUrl === "https://a.example")!;
+  await controller.switchAccount(accountA.id);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(opened).toEqual([]);
+  controller.stop();
+});
+
+test("the host just signed in to or added is not offered again as another host", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().discovery).toBeUndefined();
+
+  // Added from a connect link while signed in.
+  await controller.handleLaunchPayload("takosumi://connect?host_url=https%3A%2F%2Fb.example");
+  expect(controller.getState().discovery?.hostUrl).toBe("https://b.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+  expect(controller.getState().discovery).toBeUndefined();
+
+  // Added through "add account".
+  controller.addAccount();
+  await controller.connectWithInput("c.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://c.example");
+  expect(controller.getState().addingAccount).toBe(false);
+  expect(controller.getState().discovery).toBeUndefined();
+  controller.stop();
+});
