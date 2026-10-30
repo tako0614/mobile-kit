@@ -5,7 +5,8 @@ import {
   parseNotificationPusherSetRequest,
   type NotificationPusher,
 } from "./contract/notification-pushers.ts";
-import { hostEndpoint } from "./url.ts";
+import { hostEndpoint, normalizeHostUrl } from "./url.ts";
+import { sameOriginApiBaseUrl } from "./accounts.ts";
 import { decodeWire, type WireDecoder } from "./wire.ts";
 
 export { NOTIFICATION_PUSHER_REGISTRATION_PATH };
@@ -58,17 +59,48 @@ export interface MobileHostNotificationPusherUnregistrationInput {
   readonly fetch?: FetchLike;
 }
 
+/**
+ * Resolves a request path for a session. With `apiBasePath`, the path is
+ * relative to the API root the host advertised (`session.apiBaseUrl`), or to
+ * `apiBasePath` on the host when none was advertised. The result always stays
+ * on the session's own host, so a token is never sent to another origin.
+ */
+export function resolveMobileApiUrl(
+  session: MobileSession,
+  path: string,
+  apiBasePath?: string,
+): string {
+  if (apiBasePath === undefined) return hostEndpoint(session.hostUrl, path);
+  if (!path.startsWith("/") || path.startsWith("//")) {
+    throw new Error("Mobile API path must be an absolute path.");
+  }
+  if (!apiBasePath.startsWith("/") || apiBasePath.startsWith("//")) {
+    throw new Error("Mobile API base path must be an absolute path.");
+  }
+  const base =
+    sameOriginApiBaseUrl(session.apiBaseUrl, session.hostUrl) ??
+    `${normalizeHostUrl(session.hostUrl)}${apiBasePath.replace(/\/+$/u, "")}`;
+  return hostEndpoint(session.hostUrl, `${base}${path}`);
+}
+
 export function createMobileApiClient(input: {
   readonly session: MobileSession;
   readonly fetch?: FetchLike;
+  /**
+   * Resolve request paths against the host's advertised API root, falling back
+   * to this path on the host (for example `/api/v1`).
+   */
+  readonly apiBasePath?: string;
 }): MobileApiClient {
   const fetcher = input.fetch ?? globalThis.fetch.bind(globalThis);
+  const requestUrl = (path: string) =>
+    resolveMobileApiUrl(input.session, path, input.apiBasePath);
   const requestJson = async (
     path: string,
     init: RequestInit = {},
   ): Promise<unknown> => {
     const response = await fetcher(
-      hostEndpoint(input.session.hostUrl, path),
+      requestUrl(path),
       {
         ...init,
         headers: {
@@ -81,11 +113,17 @@ export function createMobileApiClient(input: {
     if (!response.ok) {
       throw new MobileApiError(
         response.status,
-        path,
+        reportedPath(path),
         await readErrorDetail(response),
       );
     }
     return await response.json();
+  };
+  // With an API root, report the path that was actually requested.
+  const reportedPath = (path: string) => {
+    if (input.apiBasePath === undefined) return path;
+    const url = new URL(requestUrl(path));
+    return `${url.pathname}${url.search}`;
   };
   return {
     session: input.session,
@@ -97,11 +135,7 @@ export function createMobileApiClient(input: {
       decoder: WireDecoder<T>,
       init: RequestInit = {},
     ): Promise<T> {
-      return decodeWire(
-        decoder,
-        await requestJson(path, init),
-        hostEndpoint(input.session.hostUrl, path),
-      );
+      return decodeWire(decoder, await requestJson(path, init), requestUrl(path));
     },
   };
 }

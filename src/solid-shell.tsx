@@ -14,12 +14,14 @@ import {
 } from "./client.ts";
 import { resolvePushNotificationPath } from "./push-navigation.ts";
 import type {
+  MobileAccountSummary,
   MobileKnownHost,
   MobileProductAdapter,
   MobileSession,
   MobileSessionUnlockOptions,
   NativeBridge,
 } from "./types.ts";
+import { normalizeHostUrl } from "./url.ts";
 import {
   createMobileHostRouteUrl,
   openMobileHostRoute,
@@ -88,6 +90,21 @@ export interface MobileShellCopy<Home> {
   readonly homeTitle: (home: Home | undefined) => string | undefined;
   readonly metricsLabel: string;
   readonly shortcutsLabel: string;
+  /** Account switcher and saved-account copy (Japanese defaults). */
+  readonly accountsLabel?: string;
+  readonly savedAccountsLabel?: string;
+  readonly addAccountLabel?: string;
+  readonly cancelAddAccountLabel?: string;
+  readonly activeAccountLabel?: string;
+  readonly signOutAccountLabel?: string;
+  readonly switchToSavedAccountLabel?: string;
+  readonly discoveredWhileSignedInHeading?: string;
+  readonly signInToAddLabel?: string;
+  readonly dismissDiscoveryLabel?: string;
+  /** Shown instead of the sign-in button when the host advertises no mobile client. */
+  readonly signInUnavailableMessage?: string;
+  readonly signInUnavailableHelpUrl?: string;
+  readonly signInUnavailableHelpLabel?: string;
 }
 
 export interface MobileClientShellProps<Home> {
@@ -145,6 +162,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
     string | undefined
   >();
   const [password, setPassword] = createSignal("");
+  const [accountsOpen, setAccountsOpen] = createSignal(false);
   const [setupMode, setSetupMode] = createSignal<"choices" | "manual">(
     "choices",
   );
@@ -252,6 +270,35 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
 
   const homeTitle = () =>
     props.copy.homeTitle(state().home) ?? props.copy.homeFallbackTitle;
+  const mobileClientMissing = (discovery: { readonly wireViolations?: readonly { readonly requirement: string }[] }) =>
+    (discovery.wireViolations ?? []).some(
+      (violation) =>
+        violation.requirement === "oidc-host-advertises-a-mobile-client-id",
+    );
+  const showSetup = () =>
+    (!state().session || state().addingAccount) && !state().lockedSession;
+  const savedAccountForHost = (hostUrl: string | undefined) => {
+    if (!hostUrl) return undefined;
+    let normalized: string;
+    try {
+      normalized = normalizeHostUrl(hostUrl);
+    } catch {
+      return undefined;
+    }
+    return state().accounts.find((account) => account.hostUrl === normalized);
+  };
+  async function switchAccount(accountId: string) {
+    setAccountsOpen(false);
+    await controller.switchAccount(accountId);
+  }
+  async function signOutAccount(accountId: string) {
+    await controller.signOutAccount(accountId);
+  }
+  function addAccount() {
+    setAccountsOpen(false);
+    setSetupMode("choices");
+    controller.addAccount();
+  }
   const hostCenterAction = () =>
     controller.actions.find((action) => action.id === "host");
   const qrAction = () =>
@@ -270,10 +317,17 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       data-product={props.adapter.product}
       style={{ "--accent": props.adapter.accentColor }}
     >
-      <Show
-        when={!state().session && !state().discovery && !state().lockedSession}
-      >
+      <Show when={showSetup() && !state().discovery}>
         <section class="mobile-onboarding" data-step={setupMode()}>
+          <Show when={state().addingAccount}>
+            <button
+              type="button"
+              class="text-button add-account-cancel"
+              onClick={() => controller.cancelAddAccount()}
+            >
+              {props.copy.cancelAddAccountLabel ?? "キャンセル"}
+            </button>
+          </Show>
           <Show when={setupMode() === "choices"}>
             <div class="onboarding-step" data-direction={stepDirection()}>
               <Show
@@ -433,7 +487,29 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
         </section>
       </Show>
 
-      <Show when={!state().session && state().knownHosts.length > 0}>
+      <Show
+        when={
+          !state().session &&
+          !state().lockedSession &&
+          !state().addingAccount &&
+          state().accounts.length > 0
+        }
+      >
+        <section
+          class="known-hosts saved-accounts"
+          aria-label={props.copy.savedAccountsLabel ?? "保存したアカウント"}
+        >
+          <div class="known-hosts-header">
+            <h2>{props.copy.savedAccountsLabel ?? "保存したアカウント"}</h2>
+          </div>
+          <AccountRows
+            accounts={state().accounts}
+            onSelect={(id) => void switchAccount(id)}
+          />
+        </section>
+      </Show>
+
+      <Show when={showSetup() && state().knownHosts.length > 0}>
         <section
           class="known-hosts"
           aria-label={props.copy.knownHostsLabel ?? "Recent hosts"}
@@ -478,7 +554,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
         </section>
       </Show>
 
-      <Show when={!state().session && state().discovery}>
+      <Show when={showSetup() ? state().discovery : undefined}>
         {(current) => (
           <section class="result-panel">
             <h2>{props.copy.discoveredHeading}</h2>
@@ -512,11 +588,50 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
             </dl>
             <Show
               when={
-                current().authMethods?.oidc ?? Boolean(current().oidcIssuer)
+                (current().authMethods?.oidc ?? Boolean(current().oidcIssuer)) &&
+                !mobileClientMissing(current())
               }
             >
               <button type="button" class="primary" onClick={startSignIn}>
                 Sign in with OIDC
+              </button>
+            </Show>
+            <Show when={mobileClientMissing(current())}>
+              <p class="status sign-in-unavailable" role="note">
+                {props.copy.signInUnavailableMessage ??
+                  "この接続先はモバイルアプリのサインインを有効にしていません。運用者に確認してください。"}
+              </p>
+              <Show when={props.copy.signInUnavailableHelpUrl}>
+                {(helpUrl) => (
+                  <button
+                    type="button"
+                    class="text-button"
+                    onClick={() => void props.nativeBridge.openExternalUrl(helpUrl())}
+                  >
+                    {props.copy.signInUnavailableHelpLabel ?? "運用者向けの手順"}
+                  </button>
+                )}
+              </Show>
+            </Show>
+            <Show when={savedAccountForHost(current().hostUrl)}>
+              {(saved) => (
+                <button
+                  type="button"
+                  class="secondary"
+                  onClick={() => void switchAccount(saved().id)}
+                >
+                  {props.copy.switchToSavedAccountLabel ??
+                    "保存したアカウントに切り替える"}
+                </button>
+              )}
+            </Show>
+            <Show when={state().addingAccount}>
+              <button
+                type="button"
+                class="text-button"
+                onClick={() => controller.cancelAddAccount()}
+              >
+                {props.copy.cancelAddAccountLabel ?? "キャンセル"}
               </button>
             </Show>
             <Show when={current().authMethods?.password}>
@@ -562,13 +677,114 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
               </button>
             </div>
             <p class="status">{state().status}</p>
+            <Show when={state().accounts.length > 1}>
+              <AccountRows
+                accounts={state().accounts}
+                activeId={state().activeAccountId}
+                activeLabel={props.copy.activeAccountLabel ?? "使用中"}
+                onSelect={(id) => void switchAccount(id)}
+              />
+            </Show>
           </section>
         )}
       </Show>
 
-      <Show when={state().session}>
+      <Show
+        when={
+          state().session && !state().addingAccount ? state().discovery : undefined
+        }
+      >
+        {(found) => (
+          <section class="result-panel discovered-while-signed-in" role="status">
+            <h2>
+              {props.copy.discoveredWhileSignedInHeading ??
+                "別の接続先が見つかりました"}
+            </h2>
+            <p>{found().hostUrl}</p>
+            <div class="panel-actions">
+              <Show
+                when={savedAccountForHost(found().hostUrl)}
+                fallback={
+                  <Show
+                    when={!mobileClientMissing(found())}
+                    fallback={
+                      <p class="status sign-in-unavailable" role="note">
+                        {props.copy.signInUnavailableMessage ??
+                          "この接続先はモバイルアプリのサインインを有効にしていません。運用者に確認してください。"}
+                      </p>
+                    }
+                  >
+                    <button type="button" class="primary" onClick={startSignIn}>
+                      {props.copy.signInToAddLabel ?? "サインインして追加"}
+                    </button>
+                  </Show>
+                }
+              >
+                {(saved) => (
+                  <button
+                    type="button"
+                    class="primary"
+                    onClick={() => void switchAccount(saved().id)}
+                  >
+                    {props.copy.switchToSavedAccountLabel ??
+                      "保存したアカウントに切り替える"}
+                  </button>
+                )}
+              </Show>
+              <button
+                type="button"
+                class="text-button"
+                onClick={() => controller.cancelAddAccount()}
+              >
+                {props.copy.dismissDiscoveryLabel ?? "閉じる"}
+              </button>
+            </div>
+            <p class="status" aria-live="polite">
+              {state().status}
+            </p>
+          </section>
+        )}
+      </Show>
+
+      <Show when={state().addingAccount ? undefined : state().session}>
         {(current) => (
           <section class="result-panel">
+            <div class="account-bar">
+              <button
+                type="button"
+                class="account-current"
+                aria-expanded={accountsOpen()}
+                aria-label={props.copy.accountsLabel ?? "アカウント"}
+                onClick={() => setAccountsOpen(!accountsOpen())}
+              >
+                <span>{hostLabel(current().hostUrl)}</span>
+                <Show when={current().accountLabel}>
+                  {(label) => <small>{label()}</small>}
+                </Show>
+              </button>
+            </div>
+            <Show when={accountsOpen()}>
+              <section
+                class="account-switcher"
+                aria-label={props.copy.accountsLabel ?? "アカウント"}
+              >
+                <AccountRows
+                  accounts={state().accounts}
+                  activeId={state().activeAccountId}
+                  activeLabel={props.copy.activeAccountLabel ?? "使用中"}
+                  onSelect={(id) => void switchAccount(id)}
+                  signOutLabel={props.copy.signOutAccountLabel ?? "サインアウト"}
+                  onSignOut={(id) => void signOutAccount(id)}
+                />
+                <button
+                  type="button"
+                  class="secondary add-account"
+                  onClick={() => addAccount()}
+                >
+                  {props.copy.addAccountLabel ?? "アカウントを追加"}
+                </button>
+              </section>
+            </Show>
             <div class="panel-header">
               <div>
                 <h2>{homeTitle()}</h2>
@@ -664,6 +880,62 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       </Show>
     </main>
   );
+}
+
+function AccountRows(props: {
+  readonly accounts: readonly MobileAccountSummary[];
+  readonly activeId?: string;
+  readonly activeLabel?: string;
+  readonly onSelect: (accountId: string) => void;
+  readonly signOutLabel?: string;
+  readonly onSignOut?: (accountId: string) => void;
+}) {
+  return (
+    <div class="known-host-list account-list">
+      <For each={props.accounts}>
+        {(account) => (
+          <div
+            class="known-host-row account-row"
+            data-active={account.id === props.activeId ? "true" : undefined}
+          >
+            <button
+              type="button"
+              class="known-host account-select"
+              aria-current={account.id === props.activeId ? "true" : undefined}
+              onClick={() => props.onSelect(account.id)}
+            >
+              <span>{hostLabel(account.hostUrl)}</span>
+              <small>
+                {account.label ?? formatKnownHostDate(account.lastUsedAt)}
+                {account.id === props.activeId && props.activeLabel
+                  ? ` · ${props.activeLabel}`
+                  : ""}
+              </small>
+            </button>
+            <Show when={props.onSignOut}>
+              {(onSignOut) => (
+                <button
+                  type="button"
+                  class="known-host-remove"
+                  onClick={() => onSignOut()(account.id)}
+                >
+                  {props.signOutLabel ?? "Sign out"}
+                </button>
+              )}
+            </Show>
+          </div>
+        )}
+      </For>
+    </div>
+  );
+}
+
+function hostLabel(hostUrl: string): string {
+  try {
+    return new URL(hostUrl).host;
+  } catch {
+    return hostUrl;
+  }
 }
 
 function formatCount(value: number | undefined): string {

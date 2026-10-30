@@ -1,6 +1,8 @@
 export type {
   FetchLike,
   HostCapabilities,
+  MobileAccountList,
+  MobileAccountSummary,
   HostDiscovery,
   MobileConnectPayload,
   MobileHostCenterSource,
@@ -101,6 +103,7 @@ export {
   resolveNotificationPusherConfigEndpoint,
   resolveNotificationPusherEndpoint,
   resolveNotificationPusherGatewayUrl,
+  resolveMobileApiUrl,
   unregisterNotificationPusherWithHost,
   type HostNotificationPusherConfig,
   type MobileApiClient,
@@ -146,6 +149,25 @@ export {
   OIDC_DISCOVERY_DECODER,
 } from "./oidc.ts";
 export {
+  loadActiveMobileAccountSession,
+  loadMobileAccounts,
+  loadMobileAccountSession,
+  mobileAccountIdentity,
+  mobileAccountListStorageKey,
+  mobileAccountSessionStorageKey,
+  readIdTokenAccount,
+  removeMobileAccountSession,
+  removeMobileAccountSessionFor,
+  sameOriginApiBaseUrl,
+  saveMobileAccountSession,
+  setActiveMobileAccount,
+  type MobileAccountIdInput,
+  type MobileAccountStoreInput,
+  type MobileIdTokenAccount,
+  type SaveMobileAccountSessionInput,
+  type SetActiveMobileAccountInput,
+} from "./accounts.ts";
+export {
   beginMobileOidcSignIn,
   clearMobileCredentials,
   clearMobileSession,
@@ -157,6 +179,8 @@ export {
   mobileSessionStorageKey,
   persistMobileSession,
   refreshMobileSession,
+  revokeMobileHostSession,
+  revokeMobileOidcSession,
   signInWithMobilePassword,
   type BeginMobileOidcSignInInput,
   type BeginMobileOidcSignInResult,
@@ -164,6 +188,7 @@ export {
   type EnsureFreshMobileSessionInput,
   type PersistMobileSessionInput,
   type RefreshMobileSessionInput,
+  type RevokeMobileOidcSessionInput,
   type SignInWithMobilePasswordInput,
 } from "./auth.ts";
 export {

@@ -40,7 +40,7 @@ function bundleFetch(bundle: MobileHostWireBundle): FetchLike {
   };
 }
 
-test("discoverHost reads product, capabilities, and the upstream OIDC issuer", async () => {
+test("discoverHost reads product discovery and the upstream OIDC issuer", async () => {
   const bundle = fixtureBundle("external-issuer-oidc-host");
 
   const discovery = await discoverHost({
@@ -220,3 +220,90 @@ function json(value: unknown): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+test("discoverHost reads a Takosumi instance from one well-known document", async () => {
+  const requested: string[] = [];
+  const fetcher: FetchLike = async (input) => {
+    const url = String(input);
+    requested.push(url);
+    if (url === "https://app.takosumi.example/.well-known/takosumi") {
+      // Shape served by Takosumi today, including extension endpoints.
+      return json({
+        product: "takosumi",
+        name: "Takosumi",
+        oidcClientId: "takosumi-mobile",
+        auth: { oidc: true, password: false },
+        apiBaseUrl: "https://app.takosumi.example/api/v1",
+        api_versions: ["takosumi.dev/v1alpha1"],
+        endpoints: {
+          api: "https://app.takosumi.example/api/v1",
+          capabilities: "https://app.takosumi.example/api/v1/capabilities",
+          openapi: "https://app.takosumi.example/openapi.json",
+          oidc_issuer: "https://accounts.takosumi.example",
+          extensions: {
+            "openai.models.v1": "https://app.takosumi.example/api/v1/ai",
+          },
+        },
+      });
+    }
+    return new Response("", { status: 404 });
+  };
+
+  const discovery = await discoverHost({
+    hostUrl: "app.takosumi.example",
+    expectedProduct: "takosumi",
+    fetch: fetcher,
+  });
+
+  expect(requested).toEqual(["https://app.takosumi.example/.well-known/takosumi"]);
+  expect(discovery.detectedProduct).toBe("takosumi");
+  expect(discovery.oidcClientId).toBe("takosumi-mobile");
+  expect(discovery.oidcIssuer).toBe("https://accounts.takosumi.example");
+  expect(discovery.apiBaseUrl).toBe("https://app.takosumi.example/api/v1");
+  expect(discovery.product?.endpoints?.api).toBe("https://app.takosumi.example/api/v1");
+  expect("extensions" in (discovery.product?.endpoints ?? {})).toBe(false);
+  expect(discovery.wireViolations).toEqual([]);
+});
+
+test("discoverHost drops an API base URL on another origin and rejects malformed extensions", async () => {
+  const discovery = await discoverHost({
+    hostUrl: "https://app.takosumi.example",
+    expectedProduct: "takosumi",
+    fetch: async () =>
+      json({
+        product: "takosumi",
+        oidcClientId: "takosumi-mobile",
+        apiBaseUrl: "https://collector.example/api/v1",
+        endpoints: { oidc_issuer: "https://app.takosumi.example" },
+      }),
+  });
+  expect(discovery.apiBaseUrl).toBeUndefined();
+
+  await expect(
+    discoverHost({
+      hostUrl: "https://app.takosumi.example",
+      expectedProduct: "takosumi",
+      fetch: async () =>
+        json({
+          product: "takosumi",
+          endpoints: {
+            oidc_issuer: "https://app.takosumi.example",
+            extensions: { "a.v1": 42 },
+          },
+        }),
+    }),
+  ).rejects.toThrow("endpoints.extensions.a.v1 must be a string");
+});
+
+test("discoverHost no longer requests the retired capabilities document", async () => {
+  const requested: string[] = [];
+  await discoverHost({
+    hostUrl: "https://app.example",
+    expectedProduct: "example-app",
+    fetch: async (input) => {
+      requested.push(String(input));
+      return bundleFetch(fixtureBundle("external-issuer-oidc-host"))(input);
+    },
+  });
+  expect(requested.some((url) => url.endsWith(HOST_CAPABILITIES_PATH))).toBe(false);
+});

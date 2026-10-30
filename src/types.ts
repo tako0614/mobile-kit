@@ -93,6 +93,11 @@ export interface HostDiscovery {
   readonly oidcIssuer?: string;
   readonly oidcClientId?: string;
   readonly oidcDiscoveryUrl?: string;
+  /**
+   * Host-advertised API root (`apiBaseUrl`), accepted only on the host's own
+   * origin so a discovery document cannot route the host's token elsewhere.
+   */
+  readonly apiBaseUrl?: string;
   readonly authMethods?: {
     readonly oidc: boolean;
     readonly password: boolean;
@@ -203,6 +208,7 @@ export interface MobileAuthRequest {
   readonly product: MobileProductKind;
   readonly oidcIssuer: string;
   readonly oidcClientId: string;
+  readonly apiBaseUrl?: string;
   readonly productEndpoints?: ProductWellKnownEndpoints;
   readonly redirectUri: string;
   readonly state: string;
@@ -215,6 +221,15 @@ export interface MobileSession {
   readonly product: MobileProductKind;
   readonly oidcIssuer?: string;
   readonly oidcClientId?: string;
+  /** Same-origin API root the host advertised when this session was created. */
+  readonly apiBaseUrl?: string;
+  /**
+   * Account subject (`sub`) from the ID token, when the sign-in returned one
+   * for this exact issuer and client. Sessions are kept per (host, account).
+   */
+  readonly accountId?: string;
+  /** Display label for the account (email or name claim); never a credential. */
+  readonly accountLabel?: string;
   readonly productEndpoints?: ProductWellKnownEndpoints;
   readonly accessToken: string;
   readonly tokenType: string;
@@ -223,6 +238,25 @@ export interface MobileSession {
   readonly scope?: string;
   readonly createdAt: string;
   readonly expiresAt?: string;
+}
+
+/**
+ * Non-secret row describing one saved (host, account) session. The tokens live
+ * only in the credential store under the row's opaque `id`.
+ */
+export interface MobileAccountSummary {
+  readonly id: string;
+  readonly hostUrl: string;
+  readonly product: MobileProductKind;
+  readonly accountId?: string;
+  readonly label?: string;
+  readonly lastUsedAt: string;
+}
+
+export interface MobileAccountList {
+  readonly activeId?: string;
+  /** Most recently used first. */
+  readonly accounts: readonly MobileAccountSummary[];
 }
 
 export interface MobilePushRegistrationInput {

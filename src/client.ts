@@ -1,6 +1,8 @@
 import type {
   FetchLike,
   HostDiscovery,
+  MobileAccountList,
+  MobileAccountSummary,
   MobileBiometricPrompt,
   MobileConnectPayload,
   MobileProductAdapter,
@@ -15,16 +17,24 @@ import type {
 } from "./types.ts";
 import {
   beginMobileOidcSignIn,
-  clearMobileCredentials,
-  clearMobileSession,
   completeMobileOidcSignIn,
   ensureFreshMobileSession,
   isOidcCallbackPayload,
   loadMobileSession,
-  persistMobileSession,
+  mobileAuthRequestStorageKey,
   revokeMobileHostSession,
+  revokeMobileOidcSession,
   signInWithMobilePassword,
 } from "./auth.ts";
+import {
+  loadMobileAccounts,
+  loadMobileAccountSession,
+  removeMobileAccountSession,
+  removeMobileAccountSessionFor,
+  saveMobileAccountSession,
+  setActiveMobileAccount,
+} from "./accounts.ts";
+import { deleteCredentialFromStores } from "./credential-store.ts";
 import { discoverHost } from "./discovery.ts";
 import { parseMobileConnectInput, parseMobileRouteInput } from "./handoff.ts";
 import {
@@ -51,6 +61,12 @@ export interface MobileClientState<Home = unknown> {
   readonly connectInput: string;
   readonly connectPayload?: MobileConnectPayload;
   readonly knownHosts: readonly MobileKnownHost[];
+  /** Saved (host, account) sessions, most recently used first. */
+  readonly accounts: readonly MobileAccountSummary[];
+  /** Row id of the account whose session is active (or locked). */
+  readonly activeAccountId?: string;
+  /** True while the user connects another host without leaving the current one. */
+  readonly addingAccount: boolean;
   readonly status: string;
   readonly discovery?: HostDiscovery;
   readonly pendingRoute?: MobileRoutePayload;
@@ -103,6 +119,9 @@ export interface MobileClientCopy {
   readonly knownHostsLabel?: string;
   readonly knownHostRemovedStatus?: string;
   readonly knownHostsClearedStatus?: string;
+  readonly accountSwitchedStatus?: string;
+  readonly accountMissingStatus?: string;
+  readonly addAccountStatus?: string;
 }
 
 export interface MobilePushRegistrationCallbackInput {
@@ -167,6 +186,13 @@ export interface MobileClientController<Home = unknown> {
     session?: MobileSession,
   ) => Promise<void>;
   readonly signOut: () => Promise<void>;
+  /** Make a saved account the active one (no new sign-in). */
+  readonly switchAccount: (accountId: string) => Promise<void>;
+  /** Signs out of one saved account: revokes its tokens and forgets it. */
+  readonly signOutAccount: (accountId: string) => Promise<void>;
+  /** Start connecting another host while keeping the current session. */
+  readonly addAccount: () => void;
+  readonly cancelAddAccount: () => void;
   readonly selectAction: (
     actionId: FirstRunAction["id"],
   ) => Promise<MobileClientActionResult>;
@@ -182,6 +208,8 @@ export function createMobileClientController<Home = unknown>(
   let state: MobileClientState<Home> = {
     connectInput: "",
     knownHosts: [],
+    accounts: [],
+    addingAccount: false,
     status: copy.initialStatus,
     unlockLoading: false,
     homeStatus: "",
@@ -207,17 +235,20 @@ export function createMobileClientController<Home = unknown>(
   async function clearSessionAfterRefreshFailure(
     error: unknown,
     expectedEpoch: number,
+    failed: MobileSession,
   ) {
     if (expectedEpoch !== sessionLifecycleEpoch) return;
     invalidateSessionLifecycle();
     await stopPushEventListeners();
-    await enqueueSessionStorageOperation(async () => {
-      await clearMobileSession({
+    const list = await enqueueSessionStorageOperation(async () =>
+      await removeMobileAccountSessionFor({
         adapter: options.adapter,
         nativeBridge: options.nativeBridge,
-      });
-    });
+        session: failed,
+      }),
+    );
     publish({
+      ...accountListState(list),
       session: undefined,
       lockedSession: undefined,
       unlockLoading: false,
@@ -244,15 +275,13 @@ export function createMobileClientController<Home = unknown>(
         persistSession: false,
         fetch: options.fetch,
       });
-      if (
-        session !== next &&
-        !(await persistSessionForEpoch(session, expectedEpoch))
-      ) {
-        return session;
-      }
+      // The issuer rotated the refresh token, so the new tokens are kept for
+      // that account even if the user switched meanwhile; an account signed
+      // out during the refresh is not brought back.
+      if (session !== next) await persistRefreshedSession(session);
       return session;
     } catch (error) {
-      await clearSessionAfterRefreshFailure(error, expectedEpoch);
+      await clearSessionAfterRefreshFailure(error, expectedEpoch, next);
       throw error;
     }
   }
@@ -284,6 +313,8 @@ export function createMobileClientController<Home = unknown>(
     publish({
       session,
       knownHosts: await rememberKnownHost(session),
+      ...accountListState(await loadAccountList()),
+      addingAccount: false,
       lockedSession: undefined,
       unlockLoading: false,
       lastPushNotification: undefined,
@@ -323,24 +354,51 @@ export function createMobileClientController<Home = unknown>(
     return queued;
   }
 
-  async function persistSessionForEpoch(
+  /** Saves a new sign-in and makes it active, unless the lifecycle moved on. */
+  async function commitSignedInSession(
     session: MobileSession,
     expectedEpoch: number,
   ): Promise<boolean> {
     return await enqueueSessionStorageOperation(async () => {
       if (expectedEpoch !== sessionLifecycleEpoch) return false;
-      await persistMobileSession({
+      await saveMobileAccountSession({
         adapter: options.adapter,
         nativeBridge: options.nativeBridge,
         session,
+        activate: true,
       });
-      if (expectedEpoch === sessionLifecycleEpoch) return true;
-      await clearMobileSession({
+      return true;
+    });
+  }
+
+  async function persistRefreshedSession(session: MobileSession) {
+    await enqueueSessionStorageOperation(async () => {
+      await saveMobileAccountSession({
+        adapter: options.adapter,
+        nativeBridge: options.nativeBridge,
+        session,
+        activate: false,
+        onlyIfExisting: true,
+      });
+    });
+  }
+
+  async function loadAccountList(): Promise<MobileAccountList> {
+    try {
+      return await loadMobileAccounts({
         adapter: options.adapter,
         nativeBridge: options.nativeBridge,
       });
-      return false;
-    });
+    } catch {
+      return { accounts: state.accounts, activeId: state.activeAccountId };
+    }
+  }
+
+  async function revokeSessionBestEffort(session: MobileSession) {
+    await Promise.allSettled([
+      revokeMobileHostSession({ session, fetch: options.fetch }),
+      revokeMobileOidcSession({ session, fetch: options.fetch }),
+    ]);
   }
 
   async function unregisterPushBestEffort(
@@ -459,7 +517,8 @@ export function createMobileClientController<Home = unknown>(
     if (
       !current ||
       current.hostUrl !== session.hostUrl ||
-      current.product !== session.product
+      current.product !== session.product ||
+      current.accountId !== session.accountId
     ) {
       return undefined;
     }
@@ -602,6 +661,18 @@ export function createMobileClientController<Home = unknown>(
     }
 
     if (route.hostUrl) {
+      // A saved session for that host is reused; the route opens once the
+      // switch activates it.
+      const routeHost = normalizeHostUrl(route.hostUrl);
+      const saved = state.accounts.find(
+        (account) =>
+          account.hostUrl === routeHost && account.id !== state.activeAccountId,
+      );
+      if (saved && current) {
+        publish({ pendingRoute: route, status: copy.routePendingStatus });
+        await controller.switchAccount(saved.id);
+        return;
+      }
       publish({
         pendingRoute: route,
         connectInput: route.hostUrl,
@@ -746,6 +817,78 @@ export function createMobileClientController<Home = unknown>(
     }
   }
 
+  async function signOutAccountInternal(
+    accountId: string | undefined,
+    currentSession: MobileSession | undefined,
+  ) {
+    const currentPushRegistration = state.pushRegistration;
+    connectionEpoch += 1;
+    connectionAbortController?.abort();
+    connectionAbortController = undefined;
+    invalidateSessionLifecycle();
+    publish({
+      connectPayload: undefined,
+      discovery: undefined,
+      pendingRoute: undefined,
+      session: undefined,
+      lockedSession: undefined,
+      unlockLoading: false,
+      addingAccount: false,
+      home: undefined,
+      homeStatus: "",
+      homeLoading: false,
+      pushRegistration: undefined,
+      lastPushNotification: undefined,
+      pushStatus: "",
+      pushLoading: false,
+      status: copy.signedOutStatus,
+    });
+
+    const listenerCleanup = stopPushEventListeners();
+    const revocation = currentSession
+      ? revokeSessionBestEffort(currentSession)
+      : Promise.resolve();
+    const pushCleanup = enqueuePushOperation(async () => {
+      await Promise.allSettled([
+        currentSession && currentPushRegistration
+          ? unregisterPushBestEffort(currentSession, currentPushRegistration)
+          : Promise.resolve(),
+        unregisterNativePushBestEffort(),
+      ]);
+    });
+    const list = await enqueueSessionStorageOperation(async () => {
+      await deleteCredentialFromStores(
+        options.nativeBridge,
+        mobileAuthRequestStorageKey(options.adapter),
+      );
+      if (accountId) {
+        return await removeMobileAccountSession({
+          adapter: options.adapter,
+          nativeBridge: options.nativeBridge,
+          accountId,
+        });
+      }
+      if (currentSession) {
+        return await removeMobileAccountSessionFor({
+          adapter: options.adapter,
+          nativeBridge: options.nativeBridge,
+          session: currentSession,
+        });
+      }
+      return await loadAccountList();
+    });
+    publish(accountListState(list));
+    await settleWithin(
+      Promise.allSettled([listenerCleanup, pushCleanup, revocation]),
+      signOutCleanupTimeoutMs,
+    );
+    // Continue with the most recently used remaining account, if any.
+    const next = list.accounts[0];
+    if (next && !state.session && !state.lockedSession && !state.addingAccount) {
+      await controller.switchAccount(next.id);
+    }
+  }
+
   const controller: MobileClientController<Home> = {
     actions,
     getState() {
@@ -780,6 +923,7 @@ export function createMobileClientController<Home = unknown>(
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
         });
+        publish(accountListState(await loadAccountList()));
         if (startEpoch !== sessionLifecycleEpoch) return;
         if (existingSession) {
           if (shouldLockRestoredSession(options, existingSession)) {
@@ -914,7 +1058,7 @@ export function createMobileClientController<Home = unknown>(
           persistSession: false,
           fetch: options.fetch,
         });
-        if (!(await persistSessionForEpoch(session, completionEpoch))) return;
+        if (!(await commitSignedInSession(session, completionEpoch))) return;
         await activateSession(session, copy.signedInStatus, completionEpoch);
       } catch (error) {
         if (completionEpoch === sessionLifecycleEpoch) {
@@ -935,7 +1079,7 @@ export function createMobileClientController<Home = unknown>(
           persistSession: false,
           fetch: options.fetch,
         });
-        if (!(await persistSessionForEpoch(session, completionEpoch))) return;
+        if (!(await commitSignedInSession(session, completionEpoch))) return;
         await activateSession(session, copy.signedInStatus, completionEpoch);
       } catch (error) {
         if (completionEpoch === sessionLifecycleEpoch) {
@@ -1038,58 +1182,124 @@ export function createMobileClientController<Home = unknown>(
       });
     },
     async signOut() {
-      const currentSession = state.session;
-      const currentPushRegistration = state.pushRegistration;
+      const current = state.session ?? state.lockedSession;
+      const activeId = state.activeAccountId;
+      if (activeId) {
+        await signOutAccountInternal(activeId, current);
+        return;
+      }
+      await signOutAccountInternal(undefined, current);
+    },
+    async signOutAccount(accountId) {
+      const active = accountId === state.activeAccountId;
+      if (active) {
+        await signOutAccountInternal(accountId, state.session ?? state.lockedSession);
+        return;
+      }
+      // Another saved account: revoke and forget it without touching the
+      // active session.
+      let session: MobileSession | undefined;
+      try {
+        session = await loadMobileAccountSession({
+          adapter: options.adapter,
+          nativeBridge: options.nativeBridge,
+          accountId,
+        });
+      } catch {
+        session = undefined;
+      }
+      const list = await enqueueSessionStorageOperation(async () =>
+        await removeMobileAccountSession({
+          adapter: options.adapter,
+          nativeBridge: options.nativeBridge,
+          accountId,
+        }),
+      );
+      publish({ ...accountListState(list), status: copy.signedOutStatus });
+      if (session) {
+        await settleWithin(
+          revokeSessionBestEffort(session),
+          signOutCleanupTimeoutMs,
+        );
+      }
+    },
+    async switchAccount(accountId) {
+      if (accountId === state.activeAccountId && (state.session || state.lockedSession)) {
+        publish({ addingAccount: false, discovery: undefined, connectPayload: undefined });
+        return;
+      }
+      const switchEpoch = sessionLifecycleEpoch;
+      let target: MobileSession | undefined;
+      try {
+        target = await loadMobileAccountSession({
+          adapter: options.adapter,
+          nativeBridge: options.nativeBridge,
+          accountId,
+        });
+      } catch (error) {
+        publish({
+          ...accountListState(await loadAccountList()),
+          status: mobileErrorMessage(error, copy.accountMissingStatus),
+        });
+        return;
+      }
+      if (switchEpoch !== sessionLifecycleEpoch) return;
+      if (!target) {
+        publish({
+          ...accountListState(await loadAccountList()),
+          status: copy.accountMissingStatus,
+        });
+        return;
+      }
+      const list = await enqueueSessionStorageOperation(async () =>
+        await setActiveMobileAccount({
+          adapter: options.adapter,
+          nativeBridge: options.nativeBridge,
+          accountId,
+        }),
+      );
+      if (switchEpoch !== sessionLifecycleEpoch) return;
       connectionEpoch += 1;
       connectionAbortController?.abort();
       connectionAbortController = undefined;
-      invalidateSessionLifecycle();
       publish({
-        connectPayload: undefined,
+        ...accountListState(list),
+        addingAccount: false,
         discovery: undefined,
-        pendingRoute: undefined,
-        session: undefined,
-        lockedSession: undefined,
-        unlockLoading: false,
+        connectPayload: undefined,
         home: undefined,
         homeStatus: "",
-        homeLoading: false,
-        pushRegistration: undefined,
-        lastPushNotification: undefined,
-        pushStatus: "",
-        pushLoading: false,
-        status: copy.signedOutStatus,
       });
-
-      const listenerCleanup = stopPushEventListeners();
-      const hostSessionCleanup = currentSession
-        ? revokeMobileHostSession({
-            session: currentSession,
-            fetch: options.fetch,
-          }).catch(() => false)
-        : Promise.resolve(false);
-      const pushCleanup = enqueuePushOperation(async () => {
-        await Promise.allSettled([
-          currentSession && currentPushRegistration
-            ? unregisterPushBestEffort(currentSession, currentPushRegistration)
-            : Promise.resolve(),
-          unregisterNativePushBestEffort(),
-        ]);
+      // The app-wide lock still applies: a locked app stays locked and the
+      // unlock opens the account just chosen.
+      if (state.lockedSession && !state.session) {
+        publish({ lockedSession: target, status: copy.sessionLockedStatus });
+        return;
+      }
+      await activateSession(target, copy.accountSwitchedStatus, switchEpoch);
+    },
+    addAccount() {
+      connectionEpoch += 1;
+      connectionAbortController?.abort();
+      connectionAbortController = undefined;
+      publish({
+        addingAccount: true,
+        discovery: undefined,
+        connectPayload: undefined,
+        connectInput: "",
+        status: copy.addAccountStatus,
       });
-      await enqueueSessionStorageOperation(async () => {
-        await clearMobileCredentials({
-          adapter: options.adapter,
-          nativeBridge: options.nativeBridge,
-        });
+    },
+    cancelAddAccount() {
+      connectionEpoch += 1;
+      connectionAbortController?.abort();
+      connectionAbortController = undefined;
+      publish({
+        addingAccount: false,
+        discovery: undefined,
+        connectPayload: undefined,
+        status: state.session ? "" : copy.initialStatus,
       });
-      await settleWithin(
-        Promise.allSettled([
-          listenerCleanup,
-          pushCleanup,
-          hostSessionCleanup,
-        ]),
-        signOutCleanupTimeoutMs,
-      );
     },
     async selectAction(actionId) {
       if (actionId === "direct-deploy") {
@@ -1119,6 +1329,13 @@ export function createMobileClientController<Home = unknown>(
   };
 
   return controller;
+}
+
+function accountListState(list: MobileAccountList): {
+  readonly accounts: readonly MobileAccountSummary[];
+  readonly activeAccountId: string | undefined;
+} {
+  return { accounts: list.accounts, activeAccountId: list.activeId };
 }
 
 async function settleWithin(
@@ -1259,6 +1476,14 @@ function createClientCopy(
       options.copy?.knownHostRemovedStatus ?? "接続先の履歴を削除しました。",
     knownHostsClearedStatus:
       options.copy?.knownHostsClearedStatus ?? "接続先の履歴を消去しました。",
+    accountSwitchedStatus:
+      options.copy?.accountSwitchedStatus ?? "アカウントを切り替えました。",
+    accountMissingStatus:
+      options.copy?.accountMissingStatus ??
+      "保存したアカウントを開けませんでした。もう一度サインインしてください。",
+    addAccountStatus:
+      options.copy?.addAccountStatus ??
+      `追加する${hostNoun}のURLまたは接続コードを入力してください。`,
   };
 }
 

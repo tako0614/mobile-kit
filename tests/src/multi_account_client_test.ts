@@ -1,0 +1,342 @@
+import { expect, test } from "bun:test";
+import {
+  createMobileClientController,
+  mobileSessionStorageKey,
+  type FetchLike,
+  type MobileProductAdapter,
+  type MobileSession,
+  type NativeBridge,
+} from "../../src/index.ts";
+
+const adapter: MobileProductAdapter = {
+  product: "takosumi",
+  discoveryProduct: "takosumi",
+  strictDiscoveryProduct: true,
+  appName: "Takosumi",
+  hostNoun: "Takosumi",
+  urlPlaceholder: "https://app.example",
+  primaryActionLabel: "Connect",
+  accentColor: "#f5483d",
+  mobileScheme: "takosumi",
+  oidcScopes: ["openid", "profile", "offline_access", "capsules:read", "capsules:write"],
+};
+
+interface Recorded {
+  readonly url: string;
+  readonly method: string;
+  readonly authorization?: string;
+  readonly body?: string;
+}
+
+function encode(value: unknown): string {
+  return btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+/** Two independent Takosumi instances; each mints tokens that name it. */
+function instances(): { fetch: FetchLike; requests: Recorded[] } {
+  const requests: Recorded[] = [];
+  let counter = 0;
+  const fetch: FetchLike = async (input, init) => {
+    const url = new URL(String(input));
+    const origin = url.origin;
+    const host = url.hostname.split(".")[0];
+    const headers = new Headers(init?.headers);
+    requests.push({
+      url: url.toString(),
+      method: init?.method ?? "GET",
+      authorization: headers.get("authorization") ?? undefined,
+      body: init?.body ? String(init.body) : undefined,
+    });
+    if (url.pathname === "/.well-known/takosumi") {
+      return Response.json({
+        product: "takosumi",
+        name: "Takosumi",
+        oidcClientId: "takosumi-mobile",
+        auth: { oidc: true, password: false },
+        apiBaseUrl: `${origin}/api/v1`,
+        api_versions: ["takosumi.dev/v1alpha1"],
+        endpoints: {
+          api: `${origin}/api/v1`,
+          capabilities: `${origin}/api/v1/capabilities`,
+          openapi: `${origin}/openapi.json`,
+          oidc_issuer: origin,
+          extensions: { "openai.models.v1": `${origin}/api/v1/ai` },
+        },
+      });
+    }
+    if (url.pathname === "/.well-known/openid-configuration") {
+      return Response.json({
+        issuer: origin,
+        authorization_endpoint: `${origin}/oauth/authorize`,
+        token_endpoint: `${origin}/oauth/token`,
+        revocation_endpoint: `${origin}/oauth/revoke`,
+      });
+    }
+    if (url.pathname === "/oauth/token" && init?.method === "POST") {
+      const body = new URLSearchParams(String(init.body));
+      expect(body.get("client_id")).toBe("takosumi-mobile");
+      counter += 1;
+      return Response.json({
+        access_token: `${host}-access-${counter}`,
+        refresh_token: `${host}-refresh-${counter}`,
+        token_type: "Bearer",
+        expires_in: 300,
+        scope: "openid profile offline_access capsules:read capsules:write",
+        id_token: `${encode({ alg: "ES256" })}.${encode({
+          iss: origin,
+          aud: "takosumi-mobile",
+          sub: `tsub_${host}`,
+          name: `${host} owner`,
+        })}.sig`,
+      });
+    }
+    if (url.pathname === "/oauth/revoke" && init?.method === "POST") {
+      return new Response(null, { status: 200 });
+    }
+    if (url.pathname === "/api/v1/apps") {
+      return Response.json({ apps: [{ id: `${host}-app` }] });
+    }
+    return new Response(null, { status: 404 });
+  };
+  return { fetch, requests };
+}
+
+function memoryBridge(): NativeBridge & { readonly opened: string[] } {
+  const secure = new Map<string, string>();
+  const plain = new Map<string, string>();
+  const opened: string[] = [];
+  return {
+    opened,
+    capabilities: {
+      launchPayload: true,
+      launchPayloadEvents: false,
+      externalBrowser: true,
+      inAppBrowser: false,
+      qrScanner: false,
+      localNotifications: false,
+      pushNotifications: false,
+      biometricAuth: false,
+      callIntent: false,
+      clipboardText: false,
+      secureStorage: true,
+      persistentStorage: true,
+    },
+    storage: {
+      kind: "device-persistent",
+      get: async (key) => plain.get(key),
+      set: async (key, value) => void plain.set(key, value),
+      delete: async (key) => void plain.delete(key),
+    },
+    secureStore: {
+      kind: "secure",
+      get: async (key) => secure.get(key),
+      set: async (key, value) => void secure.set(key, value),
+      delete: async (key) => void secure.delete(key),
+    },
+    getLaunchPayload: async () => undefined,
+    openExternalUrl: async (url) => void opened.push(url),
+  };
+}
+
+async function loadApps(fetch: FetchLike, session: MobileSession) {
+  const base = session.apiBaseUrl ?? `${session.hostUrl}/api/v1`;
+  const response = await fetch(`${base}/apps`, {
+    headers: { authorization: `${session.tokenType} ${session.accessToken}` },
+  });
+  return (await response.json()) as { apps: Array<{ id: string }> };
+}
+
+async function signInVia(
+  controller: Pick<
+    ReturnType<typeof createMobileClientController>,
+    "startSignIn" | "completeSignIn"
+  >,
+  bridge: ReturnType<typeof memoryBridge>,
+) {
+  await controller.startSignIn();
+  const authorize = new URL(bridge.opened.at(-1)!);
+  expect(authorize.searchParams.get("scope")).toBe(
+    "openid profile offline_access capsules:read capsules:write",
+  );
+  expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
+  await controller.completeSignIn(
+    `takosumi://oauth/callback?code=code&state=${authorize.searchParams.get("state")}`,
+  );
+}
+
+function assertNoCrossInstanceTokens(requests: readonly Recorded[]) {
+  for (const request of requests) {
+    const host = new URL(request.url).hostname.split(".")[0]!;
+    if (request.authorization) {
+      expect(request.authorization).toContain(`${host}-access-`);
+    }
+    if (request.body) {
+      const body = new URLSearchParams(request.body);
+      for (const name of ["token", "refresh_token"]) {
+        const value = body.get(name);
+        if (value) expect(value.startsWith(`${host}-`)).toBe(true);
+      }
+    }
+  }
+}
+
+test("a second instance is added from a connect link, switching changes the home, and tokens stay per instance", async () => {
+  const bridge = memoryBridge();
+  const { fetch, requests } = instances();
+  const controller = createMobileClientController({
+    adapter,
+    nativeBridge: bridge,
+    fetch,
+    loadHome: (session) => loadApps(fetch, session),
+  });
+  await controller.start();
+
+  await controller.connectWithInput("a.example");
+  expect(controller.getState().discovery?.apiBaseUrl).toBe("https://a.example/api/v1");
+  // The Takosumi document is read once and the retired capabilities path never.
+  expect(requests.filter((r) => r.url.endsWith("/.well-known/takosumi"))).toHaveLength(1);
+  expect(requests.some((r) => r.url.includes("/v1/capabilities"))).toBe(false);
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().session?.accountId).toBe("tsub_a");
+  expect(controller.getState().home?.apps[0]?.id).toBe("a-app");
+
+  // A connect link for another instance while signed in is shown, not hidden.
+  await controller.handleLaunchPayload(
+    "takosumi://connect?host_url=https://b.example&product=takosumi",
+  );
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().discovery?.hostUrl).toBe("https://b.example");
+
+  await signInVia(controller, bridge);
+  const afterB = controller.getState();
+  expect(afterB.session?.hostUrl).toBe("https://b.example");
+  expect(afterB.home?.apps[0]?.id).toBe("b-app");
+  expect(afterB.accounts.map((account) => account.hostUrl).sort()).toEqual([
+    "https://a.example",
+    "https://b.example",
+  ]);
+  expect(afterB.accounts.find((a) => a.hostUrl === "https://b.example")?.label).toBe("b owner");
+
+  const accountA = afterB.accounts.find((a) => a.hostUrl === "https://a.example")!;
+  await controller.switchAccount(accountA.id);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().activeAccountId).toBe(accountA.id);
+  expect(controller.getState().home?.apps[0]?.id).toBe("a-app");
+
+  // Signing out of A revokes A's tokens at A only, then continues with B.
+  const before = requests.length;
+  await controller.signOut();
+  const revocations = requests.slice(before).filter((r) => r.url.endsWith("/oauth/revoke"));
+  expect(revocations.map((r) => new URL(r.url).origin)).toEqual([
+    "https://a.example",
+    "https://a.example",
+  ]);
+  expect(revocations.map((r) => new URLSearchParams(r.body).get("token_type_hint"))).toEqual([
+    "refresh_token",
+    "access_token",
+  ]);
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+  expect(controller.getState().accounts).toHaveLength(1);
+  expect(controller.getState().home?.apps[0]?.id).toBe("b-app");
+
+  assertNoCrossInstanceTokens(requests);
+  controller.stop();
+});
+
+test("signing out of an inactive account revokes only it and keeps the active session", async () => {
+  const bridge = memoryBridge();
+  const { fetch, requests } = instances();
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  controller.addAccount();
+  expect(controller.getState().addingAccount).toBe(true);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  await controller.connectWithInput("b.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().addingAccount).toBe(false);
+
+  const accountA = controller.getState().accounts.find((a) => a.hostUrl === "https://a.example")!;
+  const before = requests.length;
+  await controller.signOutAccount(accountA.id);
+  const revocations = requests.slice(before).filter((r) => r.url.endsWith("/oauth/revoke"));
+  expect(new Set(revocations.map((r) => new URL(r.url).origin))).toEqual(new Set(["https://a.example"]));
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+  expect(controller.getState().accounts.map((a) => a.hostUrl)).toEqual(["https://b.example"]);
+  assertNoCrossInstanceTokens(requests);
+  controller.stop();
+});
+
+test("cancelling an added account returns to the current session", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  controller.addAccount();
+  await controller.connectWithInput("b.example");
+  expect(controller.getState().discovery?.hostUrl).toBe("https://b.example");
+  controller.cancelAddAccount();
+  expect(controller.getState().addingAccount).toBe(false);
+  expect(controller.getState().discovery).toBeUndefined();
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  controller.stop();
+});
+
+test("an existing single-session install keeps its session after the update", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  await bridge.secureStore!.set(
+    mobileSessionStorageKey(adapter),
+    JSON.stringify({
+      hostUrl: "https://a.example",
+      product: "takosumi",
+      oidcIssuer: "https://a.example",
+      oidcClientId: "takosumi-mobile",
+      accessToken: "a-access-legacy",
+      tokenType: "Bearer",
+      refreshToken: "a-refresh-legacy",
+      createdAt: "2026-10-29T00:00:00.000Z",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+  );
+  const controller = createMobileClientController({
+    adapter,
+    nativeBridge: bridge,
+    fetch,
+    loadHome: (session) => loadApps(fetch, session),
+  });
+  await controller.start();
+  expect(controller.getState().session?.accessToken).toBe("a-access-legacy");
+  expect(controller.getState().accounts).toHaveLength(1);
+  expect(controller.getState().activeAccountId).toBe(controller.getState().accounts[0]?.id);
+  expect(controller.getState().home?.apps[0]?.id).toBe("a-app");
+  controller.stop();
+});
+
+test("a route link for another saved instance switches to it", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  const opened: string[] = [];
+  const controller = createMobileClientController({
+    adapter,
+    nativeBridge: bridge,
+    fetch,
+    openHostRoute: async ({ url }) => void opened.push(url),
+  });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  controller.addAccount();
+  await controller.connectWithInput("b.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+
+  await controller.handleLaunchPayload("https://a.example/runs/run_1");
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(opened).toEqual(["https://a.example/runs/run_1"]);
+  controller.stop();
+});
