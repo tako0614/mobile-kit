@@ -1,5 +1,6 @@
 import type {
   HostDiscovery,
+  MobileAccountSummary,
   MobileKnownHost,
   MobileProductAdapter,
   MobileSession,
@@ -9,6 +10,34 @@ import { normalizeHostUrl } from "./url.ts";
 import { requireMobileProductKey } from "./product-key.ts";
 
 const knownHostsLimit = 8;
+
+/**
+ * True when this device has never signed in to `hostUrl`: it is neither a
+ * saved account nor in the recent list (which only holds hosts signed in to).
+ * A shell shows a warning before sign-in, since a link can name any host.
+ */
+export function isFirstTimeMobileHost(
+  input: {
+    readonly knownHosts: readonly Pick<MobileKnownHost, "hostUrl">[];
+    readonly accounts: readonly Pick<MobileAccountSummary, "hostUrl">[];
+  },
+  hostUrl: string,
+): boolean {
+  let normalized: string;
+  try {
+    normalized = normalizeHostUrl(hostUrl);
+  } catch {
+    return true;
+  }
+  const same = (entry: { readonly hostUrl: string }) => {
+    try {
+      return normalizeHostUrl(entry.hostUrl) === normalized;
+    } catch {
+      return false;
+    }
+  };
+  return !input.knownHosts.some(same) && !input.accounts.some(same);
+}
 
 export interface MobileKnownHostsStorageInput {
   readonly adapter: MobileProductAdapter;

@@ -107,7 +107,7 @@ UI.
   refresh is saved to the account it belongs to and never brings back an
   account signed out meanwhile.
 - Keep a product-local recent host list in normal persistent storage so
-  mobile clients can reconnect to known product hosts
+  mobile clients can reconnect to product hosts they have signed in to
   without retyping URLs, and let users remove one remembered host or clear the
   list from the shared shell.
 - Let signed-in users copy the connected host URL through the shared shell when
@@ -128,11 +128,24 @@ UI.
 - Keep route deep links pending across sign-in when the payload includes
   `host_url`, then open the requested host route after the mobile session is
   established.
-- Refuse route links before they are opened when the path would leave the host
-  (`//host`, `/\host`, other schemes), contains whitespace or control
-  characters, is longer than 2,048 characters, or carries a credential-named
-  query or fragment parameter (`code`, `token`, `access_token`, `id_token`,
-  `session`, `password`, …).
+- Screen route links and tapped-notification routes before they are opened
+  (`assertSafeMobileRoutePath` / `isSafeMobileRoutePath`). Refused: a route URL
+  that is not http(s); a path that would leave the host (`//host`, `/\host`);
+  whitespace or control characters; more than 2,048 characters; and,
+  **best effort**, parameters whose names say they carry a credential. Names
+  are compared case-insensitively without punctuation against Takosumi's
+  `CREDENTIAL_QUERY_NAMES` plus OAuth/SSO names (`code`, `id_token`,
+  `oauth_verifier`, `ticket`, `setup_ticket`, …), the `X-Amz-*` / `X-Goog-*`
+  families, and endings such as `…token`, `…secret`, `…password`,
+  `…signature`, `…sessionid` (pagination `…pageToken` excepted). Query
+  parameters split on `&` or `;`, `;name=value` path parameters, the fragment
+  and a query inside it (`#/callback?code=…`) are all read; a plain anchor
+  without `=` (`#code`, `#session`) is kept. A credential under an innocuous
+  name still passes, so hosts must not trust a value because the app opened it.
+- `MobileProductAdapter.allowRouteCodeParameter`: accept `code` (for example
+  `/join?code=…` invites). It is still refused on paths containing `callback`,
+  `oauth` or `authorize`. Without the flag, links with a `code` parameter do
+  not open.
 - A connect link for the host already in use (signed in or locked, and not
   while adding an account) just opens the app: no "another host" prompt and no
   discovery request. A connect link for another host is shown as discovered,
@@ -142,8 +155,13 @@ UI.
   saved host no longer switches the active account by itself. The host is shown
   as discovered (with "switch to the saved account" in the shared shell), the
   route stays pending, and it opens once the user switches or signs in.
-  Dismissing that prompt drops the pending route. Without the flag a route link
+  Dismissing that prompt drops the pending route, and so does a host that
+  cannot be reached (nothing could be confirmed). Without the flag a route link
   for a saved host switches to it directly (Takosumi Mobile's behavior).
+- A connect or route link still looks the host up (its discovery documents)
+  so the user sees what it is, but the host enters the recent list only after
+  a sign-in to it succeeds. The shared shell warns before sign-in when the host
+  is neither a saved account nor a recent host (`isFirstTimeMobileHost`).
 - Provide a small host API helper for registering product-neutral HTTP pushers
   through the current mobile session bearer token. It uses the host-advertised
   `notificationPushers` endpoint, falling back to

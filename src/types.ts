@@ -72,6 +72,13 @@ export interface MobileProductAdapter {
    * this, a route link for a saved host switches to it directly.
    */
   readonly confirmRouteAccountSwitch?: boolean;
+  /**
+   * Accept a `code` parameter in screen links and notification routes (for
+   * example `/join?code=…` invites on the product's own web). Without it a
+   * `code` parameter is refused like other credential names; with it, `code`
+   * is still refused on OAuth-looking paths (`callback`, `oauth`, `authorize`).
+   */
+  readonly allowRouteCodeParameter?: boolean;
 }
 
 export interface MobileConnectPayload {

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   createMobileClientController,
+  isFirstTimeMobileHost,
   mobileSessionStorageKey,
   type FetchLike,
   type MobileProductAdapter,
@@ -600,5 +601,98 @@ test("the host just signed in to or added is not offered again as another host",
   expect(controller.getState().session?.hostUrl).toBe("https://c.example");
   expect(controller.getState().addingAccount).toBe(false);
   expect(controller.getState().discovery).toBeUndefined();
+  controller.stop();
+});
+
+/** The same instances, with some hosts unreachable on demand. */
+function flakyInstances() {
+  const base = instances();
+  const offline = new Set<string>();
+  const fetch: FetchLike = async (input, init) => {
+    if (offline.has(new URL(String(input)).origin)) {
+      throw new TypeError("network unreachable");
+    }
+    return await base.fetch(input, init);
+  };
+  return { ...base, fetch, offline };
+}
+
+test("with confirmRouteAccountSwitch an unreachable saved instance drops the screen", async () => {
+  const bridge = memoryBridge();
+  const { fetch, offline } = flakyInstances();
+  const opened: string[] = [];
+  const controller = createMobileClientController({
+    adapter: { ...adapter, confirmRouteAccountSwitch: true },
+    nativeBridge: bridge,
+    fetch,
+    openHostRoute: async ({ url }) => void opened.push(url),
+  });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  controller.addAccount();
+  await controller.connectWithInput("b.example");
+  await signInVia(controller, bridge);
+
+  offline.add("https://a.example");
+  await controller.handleLaunchPayload("https://a.example/runs/run_1");
+  // Nothing to confirm or dismiss: B stays, and the screen is not kept.
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+  expect(controller.getState().discovery).toBeUndefined();
+  expect(controller.getState().pendingRoute).toBeUndefined();
+  expect(controller.getState().status).toContain("network unreachable");
+
+  // Switching to A later for another reason does not open it.
+  offline.delete("https://a.example");
+  const accountA = controller.getState().accounts.find((a) => a.hostUrl === "https://a.example")!;
+  await controller.switchAccount(accountA.id);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(opened).toEqual([]);
+  controller.stop();
+});
+
+test("a screen link for an unreachable host while signed out is not kept either", async () => {
+  const bridge = memoryBridge();
+  const { fetch, offline } = flakyInstances();
+  const opened: string[] = [];
+  const controller = createMobileClientController({
+    adapter,
+    nativeBridge: bridge,
+    fetch,
+    openHostRoute: async ({ url }) => void opened.push(url),
+  });
+  await controller.start();
+  offline.add("https://a.example");
+  await controller.handleLaunchPayload("https://a.example/apps");
+  expect(controller.getState().pendingRoute).toBeUndefined();
+  offline.delete("https://a.example");
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  expect(opened).toEqual([]);
+  controller.stop();
+});
+
+test("a connect link adds a host to the recent list only after signing in to it", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+
+  await controller.handleLaunchPayload("takosumi://connect?host_url=https%3A%2F%2Fa.example");
+  expect(controller.getState().discovery?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().knownHosts).toEqual([]);
+  expect(isFirstTimeMobileHost(controller.getState(), "https://a.example")).toBe(true);
+
+  // Probing another host and leaving it does not remember it either.
+  await controller.connectWithInput("b.example");
+  expect(controller.getState().knownHosts).toEqual([]);
+
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().knownHosts.map((host) => host.hostUrl)).toEqual([
+    "https://a.example",
+  ]);
+  expect(isFirstTimeMobileHost(controller.getState(), "https://a.example")).toBe(false);
+  expect(isFirstTimeMobileHost(controller.getState(), "https://b.example")).toBe(true);
   controller.stop();
 });
