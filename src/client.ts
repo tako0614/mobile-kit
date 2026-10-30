@@ -708,9 +708,19 @@ export function createMobileClientController<Home = unknown>(
         if (state.pendingRoute === route) publish({ pendingRoute: undefined });
         return;
       }
-      if (outcome !== "superseded") {
-        publish({ status: copy.routePendingStatus });
+      if (outcome === "superseded") {
+        // Another connect, an account switch, "add account" or stop cut the
+        // lookup short. Unless that host is on screen to confirm, drop the
+        // screen for the same reason as above.
+        if (
+          state.pendingRoute === route &&
+          !(state.discovery && sameHost(state.discovery.hostUrl, routeHost))
+        ) {
+          publish({ pendingRoute: undefined });
+        }
+        return;
       }
+      publish({ status: copy.routePendingStatus });
       return;
     }
 

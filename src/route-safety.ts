@@ -123,7 +123,12 @@ export function assertSafeMobileRoutePath(
   if (resolved.origin !== base) {
     throw new Error("Mobile route path must be an absolute same-origin path.");
   }
-  const oauthLikePath = OAUTH_LIKE_PATH.test(decodeLoosely(resolved.pathname).toLowerCase());
+  // An OAuth-looking path, in the URL or in a fragment route (`#/oauth/…`),
+  // keeps `code` refused even for a product that accepts invite codes.
+  const fragmentPath = resolved.hash.slice(1).split("?")[0] ?? "";
+  const oauthLikePath = [resolved.pathname, fragmentPath].some((candidate) =>
+    OAUTH_LIKE_PATH.test(decodeLoosely(candidate).toLowerCase())
+  );
   const allowCode = Boolean(options.allowCodeParameter) && !oauthLikePath;
   const sources = [
     // `;name=value` path parameters (`/x;jsessionid=…`).
@@ -138,7 +143,15 @@ export function assertSafeMobileRoutePath(
   ];
   for (const source of sources) {
     for (const [name, value] of parameterPairs(source)) {
-      if (value.trim() && isCredentialName(name, allowCode)) {
+      if (!value.trim()) continue;
+      // Compatibility forms (full-width `ｔｏｋｅｎ`) fold to ASCII; any other
+      // non-ASCII name could spell a credential in lookalike letters, so it is
+      // refused rather than guessed at.
+      const folded = name.normalize("NFKC");
+      if ([...folded].some((character) => character.charCodeAt(0) > 0x7e)) {
+        throw new Error("Mobile route parameter names must be ASCII.");
+      }
+      if (parameterNameParts(folded).some((part) => isCredentialName(part, allowCode))) {
         throw new Error("Mobile route links must not carry credentials.");
       }
     }
@@ -170,6 +183,19 @@ function parameterPairs(text: string): Array<[string, string]> {
     ]);
   }
   return pairs;
+}
+
+/**
+ * A name and the keys of its trailing `[…]` groups: `token[]` → `token`,
+ * `auth[token]` → `auth`, `token`; `user[password]` → `user`, `password`.
+ */
+function parameterNameParts(name: string): string[] {
+  const match = /^(.*?)((?:\[[^\[\]]*\])+)$/u.exec(name);
+  if (!match) return [name];
+  const keys = [...(match[2] ?? "").matchAll(/\[([^\[\]]*)\]/gu)].map(
+    (key) => key[1] ?? "",
+  );
+  return [match[1] ?? "", ...keys];
 }
 
 /** Percent-decodes up to three times so double-encoded names are still read. */

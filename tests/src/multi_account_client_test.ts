@@ -696,3 +696,50 @@ test("a connect link adds a host to the recent list only after signing in to it"
   expect(isFirstTimeMobileHost(controller.getState(), "https://b.example")).toBe(true);
   controller.stop();
 });
+
+test("a screen whose host lookup is cut short is dropped, not opened later", async () => {
+  const bridge = memoryBridge();
+  const base = instances();
+  let releaseA: (() => void) | undefined;
+  let holdA = false;
+  const fetch: FetchLike = async (input, init) => {
+    if (holdA && new URL(String(input)).origin === "https://a.example") {
+      await new Promise<void>((resolve) => {
+        releaseA = resolve;
+      });
+    }
+    return await base.fetch(input, init);
+  };
+  const opened: string[] = [];
+  const controller = createMobileClientController({
+    adapter: { ...adapter, confirmRouteAccountSwitch: true },
+    nativeBridge: bridge,
+    fetch,
+    openHostRoute: async ({ url }) => void opened.push(url),
+  });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  controller.addAccount();
+  await controller.connectWithInput("b.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+
+  holdA = true;
+  const link = controller.handleLaunchPayload("https://a.example/runs/run_1");
+  while (!releaseA) await new Promise((resolve) => setTimeout(resolve, 1));
+  // The lookup is cut short ("add account" here) before A could be shown.
+  controller.addAccount();
+  holdA = false;
+  releaseA();
+  await link;
+  expect(controller.getState().discovery).toBeUndefined();
+  expect(controller.getState().pendingRoute).toBeUndefined();
+
+  controller.cancelAddAccount();
+  const accountA = controller.getState().accounts.find((a) => a.hostUrl === "https://a.example")!;
+  await controller.switchAccount(accountA.id);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(opened).toEqual([]);
+  controller.stop();
+});

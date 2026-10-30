@@ -140,11 +140,14 @@ UI.
   `…signature`, `…sessionid` (pagination `…pageToken` excepted). Query
   parameters split on `&` or `;`, `;name=value` path parameters, the fragment
   and a query inside it (`#/callback?code=…`) are all read; a plain anchor
-  without `=` (`#code`, `#session`) is kept. A credential under an innocuous
+  without `=` (`#code`, `#session`) is kept. Names are folded with NFKC
+  (full-width letters become ASCII) and a name that is still not ASCII is
+  refused, since lookalike letters could spell a credential; keys in trailing
+  brackets are read too (`token[]`, `auth[token]`, `user[password]`). A credential under an innocuous
   name still passes, so hosts must not trust a value because the app opened it.
 - `MobileProductAdapter.allowRouteCodeParameter`: accept `code` (for example
-  `/join?code=…` invites). It is still refused on paths containing `callback`,
-  `oauth` or `authorize`. Without the flag, links with a `code` parameter do
+  `/join?code=…` invites). It is still refused when the path or a fragment
+  route (`#/oauth/…`) contains `callback`, `oauth` or `authorize`. Without the flag, links with a `code` parameter do
   not open.
 - A connect link for the host already in use (signed in or locked, and not
   while adding an account) just opens the app: no "another host" prompt and no
@@ -156,7 +159,8 @@ UI.
   as discovered (with "switch to the saved account" in the shared shell), the
   route stays pending, and it opens once the user switches or signs in.
   Dismissing that prompt drops the pending route, and so does a host that
-  cannot be reached (nothing could be confirmed). Without the flag a route link
+  cannot be reached or whose lookup is cut short by another connect, an
+  account switch, "add account" or stop (nothing could be confirmed). Without the flag a route link
   for a saved host switches to it directly (Takosumi Mobile's behavior).
 - A connect or route link still looks the host up (its discovery documents)
   so the user sees what it is, but the host enters the recent list only after
