@@ -64,6 +64,14 @@ export interface MobileProductAdapter {
    */
   readonly requireHostIssuer?: boolean;
   readonly requiredHostCapabilities?: readonly string[];
+  /**
+   * A route link (`<scheme>://open?path=…&host_url=…`, or a host URL) for
+   * another saved host never switches the active account by itself. The
+   * controller keeps the route pending and shows that host as discovered, so
+   * the user chooses to switch or sign in; the route opens after that. Without
+   * this, a route link for a saved host switches to it directly.
+   */
+  readonly confirmRouteAccountSwitch?: boolean;
 }
 
 export interface MobileConnectPayload {

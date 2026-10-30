@@ -123,6 +123,7 @@ export interface MobileClientCopy {
   readonly accountSwitchedStatus?: string;
   readonly accountMissingStatus?: string;
   readonly addAccountStatus?: string;
+  readonly alreadyConnectedStatus?: string;
 }
 
 export interface MobilePushRegistrationCallbackInput {
@@ -678,7 +679,10 @@ export function createMobileClientController<Home = unknown>(
         (account) =>
           account.hostUrl === routeHost && account.id !== state.activeAccountId,
       );
-      if (saved && current) {
+      // A product shell that opts in never switches accounts on a link alone:
+      // the host is shown as discovered instead, so the user chooses to switch
+      // or sign in, and the route opens once that account is active.
+      if (saved && current && !options.adapter.confirmRouteAccountSwitch) {
         publish({ pendingRoute: route, status: copy.routePendingStatus });
         await controller.switchAccount(saved.id);
         return;
@@ -783,6 +787,17 @@ export function createMobileClientController<Home = unknown>(
         !acceptedProducts.has(payload.product)
       ) {
         throw new Error("Mobile connect payload product mismatch.");
+      }
+      const connected = state.session ?? state.lockedSession;
+      if (
+        connected &&
+        !state.addingAccount &&
+        normalizeHostUrl(connected.hostUrl) === payload.hostUrl
+      ) {
+        // A connect link for the host already in use just opens the app: there
+        // is nothing to sign in to or switch, so no "another host" prompt.
+        publish({ status: copy.alreadyConnectedStatus });
+        return;
       }
       const discovery = await discoverHost({
         hostUrl: payload.hostUrl,
@@ -1308,6 +1323,9 @@ export function createMobileClientController<Home = unknown>(
         addingAccount: false,
         discovery: undefined,
         connectPayload: undefined,
+        // A route that was waiting for this host is dropped with it, so it
+        // does not open later when that host is chosen for another reason.
+        pendingRoute: undefined,
         status: state.session ? "" : copy.initialStatus,
       });
     },
@@ -1494,6 +1512,9 @@ function createClientCopy(
     addAccountStatus:
       options.copy?.addAccountStatus ??
       `追加する${hostNoun}のURLまたは接続コードを入力してください。`,
+    alreadyConnectedStatus:
+      options.copy?.alreadyConnectedStatus ??
+      `この${hostNoun}にはすでに接続しています。`,
   };
 }
 
