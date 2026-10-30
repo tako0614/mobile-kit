@@ -14,7 +14,9 @@ import {
 } from "./client.ts";
 import { resolvePushNotificationPath } from "./push-navigation.ts";
 import type {
+  HostDiscovery,
   MobileAccountSummary,
+  MobileCustomSignIn,
   MobileKnownHost,
   MobileProductAdapter,
   MobileSession,
@@ -132,6 +134,8 @@ export interface MobileClientShellProps<Home> {
   readonly renderHomeExtra?: (
     context: MobileShellHomeExtraContext<Home>,
   ) => JSX.Element;
+  /** A product sign-in for the hosts it claims; see {@link MobileCustomSignIn}. */
+  readonly customSignIn?: MobileCustomSignIn;
 }
 
 export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
@@ -159,6 +163,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
     openHostRoute: props.openHostRoute,
     sessionUnlock: props.sessionUnlock,
     homeLabel: props.homeLabel,
+    customSignIn: props.customSignIn,
   });
   const [state, setState] = createSignal<MobileClientState<Home>>(
     controller.getState(),
@@ -275,7 +280,11 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
 
   const homeTitle = () =>
     props.copy.homeTitle(state().home) ?? props.copy.homeFallbackTitle;
-  const mobileClientMissing = (discovery: { readonly wireViolations?: readonly { readonly requirement: string }[] }) =>
+  // A host the product's own sign-in claims needs no mobile OIDC client id.
+  const customSignInHandles = (discovery: HostDiscovery) =>
+    props.customSignIn?.handles(discovery) === true;
+  const mobileClientMissing = (discovery: HostDiscovery) =>
+    !customSignInHandles(discovery) &&
     (discovery.wireViolations ?? []).some(
       (violation) =>
         violation.requirement === "oidc-host-advertises-a-mobile-client-id",
@@ -604,8 +613,9 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
             </dl>
             <Show
               when={
-                (current().authMethods?.oidc ?? Boolean(current().oidcIssuer)) &&
-                !mobileClientMissing(current())
+                customSignInHandles(current()) ||
+                ((current().authMethods?.oidc ?? Boolean(current().oidcIssuer)) &&
+                  !mobileClientMissing(current()))
               }
             >
               <button type="button" class="primary" onClick={startSignIn}>

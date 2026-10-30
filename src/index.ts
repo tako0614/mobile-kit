@@ -5,6 +5,7 @@ export type {
   MobileAccountSummary,
   HostDiscovery,
   MobileConnectPayload,
+  MobileCustomSignIn,
   MobileHostCenterSource,
   MobileKeyValueStore,
   MobileKnownHost,
