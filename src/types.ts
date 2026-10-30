@@ -54,6 +54,15 @@ export interface MobileProductAdapter {
   readonly mobileScheme: string;
   /** Explicit OAuth/OIDC scopes required by this product shell. */
   readonly oidcScopes?: readonly string[];
+  /**
+   * The issuer's tokens are API credentials for the host itself (for example
+   * a Takosumi instance). Sign-in then starts only when the issuer is the host
+   * (same origin) or the issuer's own `/.well-known/takosumi` names the host as
+   * its API, so a host cannot point at another instance's issuer and receive
+   * that instance's tokens. The sign-in callback must then also carry the
+   * RFC 9207 `iss` parameter naming that issuer.
+   */
+  readonly requireHostIssuer?: boolean;
   readonly requiredHostCapabilities?: readonly string[];
 }
 
@@ -93,6 +102,11 @@ export interface HostDiscovery {
   readonly oidcIssuer?: string;
   readonly oidcClientId?: string;
   readonly oidcDiscoveryUrl?: string;
+  /**
+   * Host-advertised API root (`apiBaseUrl`), accepted only on the host's own
+   * origin so a discovery document cannot route the host's token elsewhere.
+   */
+  readonly apiBaseUrl?: string;
   readonly authMethods?: {
     readonly oidc: boolean;
     readonly password: boolean;
@@ -203,6 +217,7 @@ export interface MobileAuthRequest {
   readonly product: MobileProductKind;
   readonly oidcIssuer: string;
   readonly oidcClientId: string;
+  readonly apiBaseUrl?: string;
   readonly productEndpoints?: ProductWellKnownEndpoints;
   readonly redirectUri: string;
   readonly state: string;
@@ -215,6 +230,15 @@ export interface MobileSession {
   readonly product: MobileProductKind;
   readonly oidcIssuer?: string;
   readonly oidcClientId?: string;
+  /** Same-origin API root the host advertised when this session was created. */
+  readonly apiBaseUrl?: string;
+  /**
+   * Account subject (`sub`) from the ID token, when the sign-in returned one
+   * for this exact issuer and client. Sessions are kept per (host, account).
+   */
+  readonly accountId?: string;
+  /** Display label for the account (email or name claim); never a credential. */
+  readonly accountLabel?: string;
   readonly productEndpoints?: ProductWellKnownEndpoints;
   readonly accessToken: string;
   readonly tokenType: string;
@@ -223,6 +247,25 @@ export interface MobileSession {
   readonly scope?: string;
   readonly createdAt: string;
   readonly expiresAt?: string;
+}
+
+/**
+ * Non-secret row describing one saved (host, account) session. The tokens live
+ * only in the credential store under the row's opaque `id`.
+ */
+export interface MobileAccountSummary {
+  readonly id: string;
+  readonly hostUrl: string;
+  readonly product: MobileProductKind;
+  readonly accountId?: string;
+  readonly label?: string;
+  readonly lastUsedAt: string;
+}
+
+export interface MobileAccountList {
+  readonly activeId?: string;
+  /** Most recently used first. */
+  readonly accounts: readonly MobileAccountSummary[];
 }
 
 export interface MobilePushRegistrationInput {

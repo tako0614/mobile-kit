@@ -474,6 +474,54 @@ h1 {
   padding: 0 10px;
 }
 
+.account-bar {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.account-current {
+  display: grid;
+  justify-items: start;
+  min-height: 44px;
+  max-width: 100%;
+  border: 1px solid var(--shell-border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  background: var(--shell-card);
+  color: var(--shell-strong);
+  text-align: left;
+}
+
+.account-current span {
+  overflow-wrap: anywhere;
+  font-weight: 750;
+}
+
+.account-current small {
+  color: var(--shell-subtle);
+  font-size: 0.76rem;
+}
+
+.account-switcher {
+  display: grid;
+  gap: 10px;
+}
+
+.account-row[data-active="true"] .account-select {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--shell-border));
+}
+
+.add-account-cancel {
+  justify-self: start;
+  margin-bottom: 12px;
+}
+
+.discovered-while-signed-in p {
+  overflow-wrap: anywhere;
+  color: var(--shell-muted);
+  font-size: 0.85rem;
+}
+
 .panel-header {
   display: flex;
   align-items: flex-start;

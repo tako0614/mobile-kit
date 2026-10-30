@@ -115,17 +115,31 @@ export async function fetchOidcMetadata(input: {
   if (metadataIssuer !== expectedIssuer) {
     throw new Error("OIDC metadata issuer does not match requested issuer.");
   }
+  const authorizationEndpoint = normalizeOidcEndpoint(
+    value.authorization_endpoint,
+    "OIDC authorization endpoint",
+  );
+  const tokenEndpoint = normalizeOidcEndpoint(
+    value.token_endpoint,
+    "OIDC token endpoint",
+  );
+  // The issuer must serve its own authorize and token endpoints. Otherwise a
+  // host that is its own issuer could send the browser to another issuer's
+  // genuine consent and receive that issuer's code and PKCE verifier at its
+  // own token endpoint (an authorization-server mix-up).
+  for (const [label, endpoint] of [
+    ["authorization", authorizationEndpoint],
+    ["token", tokenEndpoint],
+  ] as const) {
+    if (new URL(endpoint).origin !== metadataIssuer) {
+      throw new Error(`OIDC ${label} endpoint must be on the issuer's origin.`);
+    }
+  }
   return {
     ...value,
     issuer: metadataIssuer,
-    authorization_endpoint: normalizeOidcEndpoint(
-      value.authorization_endpoint,
-      "OIDC authorization endpoint",
-    ),
-    token_endpoint: normalizeOidcEndpoint(
-      value.token_endpoint,
-      "OIDC token endpoint",
-    ),
+    authorization_endpoint: authorizationEndpoint,
+    token_endpoint: tokenEndpoint,
   } as OidcMetadata;
 }
 
@@ -152,6 +166,8 @@ export function parseOidcCallback(
   callbackUrl: string,
   expectedState: string,
   expectedRedirectUri?: string,
+  expectedIssuer?: string,
+  requireIssuer = false,
 ): OidcCallbackResult {
   const url = new URL(callbackUrl);
   if (
@@ -164,6 +180,23 @@ export function parseOidcCallback(
   }
   if (url.hash) {
     throw new Error("OIDC callback URL must not include a fragment.");
+  }
+  // RFC 9207: when the server names the issuer of the response, it must be
+  // the issuer this sign-in started with.
+  const responseIssuer = url.searchParams.get("iss");
+  if (requireIssuer && responseIssuer === null) {
+    throw new Error("OIDC callback does not name its issuer.");
+  }
+  if (responseIssuer !== null && expectedIssuer !== undefined) {
+    let matches = false;
+    try {
+      matches = normalizeHostUrl(responseIssuer) === normalizeHostUrl(expectedIssuer);
+    } catch {
+      matches = false;
+    }
+    if (!matches) {
+      throw new Error("OIDC callback issuer does not match this sign-in.");
+    }
   }
   const error = url.searchParams.get("error");
   if (error) throw new Error(`OIDC callback failed: ${error}`);

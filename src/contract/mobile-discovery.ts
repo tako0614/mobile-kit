@@ -44,6 +44,8 @@ export interface TakosumiWellKnownDocument {
   readonly issuer?: string;
   readonly capabilitiesUrl?: string;
   readonly product?: string;
+  readonly oidcClientId?: string;
+  readonly apiBaseUrl?: string;
   readonly endpoints?: {
     readonly api?: string;
     readonly capabilities?: string;
@@ -111,11 +113,26 @@ export const MOBILE_PRODUCT_WELL_KNOWN_DECODER: WireDecoder<MobileProductWellKno
       }
       if (record.endpoints !== undefined) {
         const endpoints = requireRecordAt(record.endpoints, "endpoints");
+        const stringEndpoints: Record<string, string> = {};
         for (const [key, endpoint] of Object.entries(endpoints)) {
-          if (endpoint !== undefined && typeof endpoint !== "string") {
+          if (key === "extensions") {
+            // Takosumi hosts publish capability token -> URL here. It is not a
+            // product endpoint, so it is validated and kept out of `endpoints`.
+            const extensions = requireRecordAt(endpoint, "endpoints.extensions");
+            for (const [token, url] of Object.entries(extensions)) {
+              if (typeof url !== "string") {
+                throw new Error(`endpoints.extensions.${token} must be a string`);
+              }
+            }
+            continue;
+          }
+          if (endpoint === undefined) continue;
+          if (typeof endpoint !== "string") {
             throw new Error(`endpoints.${key} must be a string`);
           }
+          stringEndpoints[key] = endpoint;
         }
+        return { ...record, endpoints: stringEndpoints } as MobileProductWellKnown;
       }
       return record as MobileProductWellKnown;
     },
@@ -129,6 +146,8 @@ export const TAKOSUMI_WELL_KNOWN_DECODER: WireDecoder<TakosumiWellKnownDocument>
       requireOptionalString(record, "issuer");
       requireOptionalString(record, "capabilitiesUrl");
       requireOptionalString(record, "product");
+      requireOptionalString(record, "oidcClientId");
+      requireOptionalString(record, "apiBaseUrl");
       if (record.api_versions !== undefined && !Array.isArray(record.api_versions)) {
         throw new Error("api_versions must be an array");
       }

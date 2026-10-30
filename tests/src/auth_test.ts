@@ -6,11 +6,14 @@ import {
   createBrowserNativeBridge,
   ensureFreshMobileSession,
   isOidcCallbackPayload,
+  loadMobileAccounts,
   loadMobileSession,
+  mobileAccountSessionStorageKey,
   mobileAuthRequestStorageKey,
   mobileSessionStorageKey,
   persistMobileSession,
   refreshMobileSession,
+  revokeMobileOidcSession,
   signInWithMobilePassword,
   type FetchLike,
   type BrowserNativeWindow,
@@ -323,9 +326,15 @@ test("persistMobileSession explicitly saves an exchanged session", async () => {
   expect(
     (await loadMobileSession({ adapter, nativeBridge: bridge }))?.accessToken,
   ).toBe("access-1");
+  const { activeId } = await loadMobileAccounts({ adapter, nativeBridge: bridge });
+  expect(
+    await bridge.secureStore?.get(
+      mobileAccountSessionStorageKey(adapter, activeId ?? ""),
+    ),
+  ).toContain('"accessToken":"access-1"');
   expect(
     await bridge.secureStore?.get(mobileSessionStorageKey(adapter)),
-  ).toContain('"accessToken":"access-1"');
+  ).toBeUndefined();
   expect(
     await bridge.storage?.get(mobileSessionStorageKey(adapter)),
   ).toBeUndefined();
@@ -389,9 +398,12 @@ test("mobile auth prefers secureStore and clears legacy persistent storage", asy
     now: () => new Date("2026-06-30T00:00:00.000Z"),
   });
 
-  expect(
-    await bridge.secureStore?.get(mobileSessionStorageKey(adapter)),
-  ).toContain('"accessToken":"access-1"');
+  const { activeId } = await loadMobileAccounts({ adapter, nativeBridge: bridge });
+  const slot = mobileAccountSessionStorageKey(adapter, activeId ?? "");
+  expect(await bridge.secureStore?.get(slot)).toContain(
+    '"accessToken":"access-1"',
+  );
+  expect(await bridge.storage?.get(slot)).toBeUndefined();
   expect(
     await bridge.storage?.get(mobileSessionStorageKey(adapter)),
   ).toBeUndefined();
@@ -399,12 +411,11 @@ test("mobile auth prefers secureStore and clears legacy persistent storage", asy
     (await loadMobileSession({ adapter, nativeBridge: bridge }))?.accessToken,
   ).toBe("access-1");
   await clearMobileSession({ adapter, nativeBridge: bridge });
+  expect(await bridge.secureStore?.get(slot)).toBeUndefined();
+  expect(await bridge.storage?.get(slot)).toBeUndefined();
   expect(
-    await bridge.secureStore?.get(mobileSessionStorageKey(adapter)),
-  ).toBeUndefined();
-  expect(
-    await bridge.storage?.get(mobileSessionStorageKey(adapter)),
-  ).toBeUndefined();
+    (await loadMobileAccounts({ adapter, nativeBridge: bridge })).accounts,
+  ).toEqual([]);
 });
 
 test("browser OIDC credentials stay in bridge-scoped memory", async () => {
@@ -490,23 +501,25 @@ test("browser consumes a legacy plaintext session once without new fallback writ
 
 test("refreshMobileSession rotates an expired mobile session", async () => {
   const bridge = memoryBridge();
+  const expired = {
+    hostUrl: "https://host.example",
+    product: "takos" as const,
+    oidcIssuer: "https://host.example",
+    oidcClientId: "takos-mobile-host-example",
+    accessToken: "expired-access",
+    tokenType: "Bearer",
+    refreshToken: "refresh-1",
+    productEndpoints: {
+      notificationPushers: "/api/notifications/pushers",
+    },
+    createdAt: "2026-06-30T00:00:00.000Z",
+    expiresAt: "2026-06-30T00:30:00.000Z",
+  };
+  await persistMobileSession({ adapter, nativeBridge: bridge, session: expired });
   const session = await refreshMobileSession({
     adapter,
     nativeBridge: bridge,
-    session: {
-      hostUrl: "https://host.example",
-      product: "takos",
-      oidcIssuer: "https://host.example",
-      oidcClientId: "takos-mobile-host-example",
-      accessToken: "expired-access",
-      tokenType: "Bearer",
-      refreshToken: "refresh-1",
-      productEndpoints: {
-        notificationPushers: "/api/notifications/pushers",
-      },
-      createdAt: "2026-06-30T00:00:00.000Z",
-      expiresAt: "2026-06-30T00:30:00.000Z",
-    },
+    session: expired,
     fetch: oidcFetch(),
     now: () => new Date("2026-06-30T01:00:00.000Z"),
   });
@@ -814,3 +827,152 @@ function dualStoreBridge(): NativeBridge {
     async openExternalUrl() {},
   };
 }
+
+test("revokeMobileOidcSession revokes both tokens at the session issuer's endpoint", async () => {
+  const requests: Array<{ url: string; body: URLSearchParams }> = [];
+  const revoked = await revokeMobileOidcSession({
+    session: {
+      hostUrl: "https://host.example",
+      product: "takos",
+      oidcIssuer: "https://accounts.example",
+      oidcClientId: "takos-mobile-host-example",
+      accessToken: "access-1",
+      refreshToken: "refresh-1",
+      tokenType: "Bearer",
+      createdAt: "2026-10-30T00:00:00.000Z",
+    },
+    fetch: async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/.well-known/openid-configuration")) {
+        return Response.json({
+          issuer: "https://accounts.example",
+          authorization_endpoint: "https://accounts.example/oauth/authorize",
+          token_endpoint: "https://accounts.example/oauth/token",
+          revocation_endpoint: "https://accounts.example/oauth/revoke",
+        });
+      }
+      requests.push({ url, body: new URLSearchParams(String(init?.body)) });
+      return new Response(null, { status: 200 });
+    },
+  });
+  expect(revoked).toBe(true);
+  expect(requests.map((request) => request.url)).toEqual([
+    "https://accounts.example/oauth/revoke",
+    "https://accounts.example/oauth/revoke",
+  ]);
+  expect(requests.map((request) => Object.fromEntries(request.body))).toEqual([
+    { token: "refresh-1", token_type_hint: "refresh_token", client_id: "takos-mobile-host-example" },
+    { token: "access-1", token_type_hint: "access_token", client_id: "takos-mobile-host-example" },
+  ]);
+});
+
+test("revokeMobileOidcSession never sends tokens off the issuer or for exchanged host sessions", async () => {
+  const base = {
+    hostUrl: "https://host.example",
+    product: "takos" as const,
+    oidcIssuer: "https://accounts.example",
+    oidcClientId: "takos-mobile-host-example",
+    accessToken: "access-1",
+    refreshToken: "refresh-1",
+    tokenType: "Bearer",
+    createdAt: "2026-10-30T00:00:00.000Z",
+  };
+  const sent: string[] = [];
+  const metadata = (revocation: string): FetchLike => async (input) => {
+    const url = String(input);
+    if (url.endsWith("/.well-known/openid-configuration")) {
+      return Response.json({
+        issuer: "https://accounts.example",
+        authorization_endpoint: "https://accounts.example/oauth/authorize",
+        token_endpoint: "https://accounts.example/oauth/token",
+        revocation_endpoint: revocation,
+      });
+    }
+    sent.push(url);
+    return new Response(null, { status: 200 });
+  };
+  await expect(
+    revokeMobileOidcSession({ session: base, fetch: metadata("https://collector.example/revoke") }),
+  ).rejects.toThrow("must stay on the issuer");
+  expect(
+    await revokeMobileOidcSession({
+      session: { ...base, productEndpoints: { mobileOidcExchange: "/api/auth/mobile/oidc" } },
+      fetch: metadata("https://accounts.example/oauth/revoke"),
+    }),
+  ).toBe(false);
+  expect(sent).toEqual([]);
+});
+
+test("a refresh never revives a signed-out account and only an issuer refusal drops one", async () => {
+  const base = {
+    hostUrl: "https://host.example",
+    product: "takos" as const,
+    oidcIssuer: "https://host.example",
+    oidcClientId: "takos-mobile-host-example",
+    accessToken: "expired-access",
+    tokenType: "Bearer",
+    refreshToken: "refresh-1",
+    createdAt: "2026-06-30T00:00:00.000Z",
+    expiresAt: "2026-06-30T00:30:00.000Z",
+  };
+  const signedOut = memoryBridge();
+  await refreshMobileSession({ adapter, nativeBridge: signedOut, session: base, fetch: oidcFetch() });
+  expect(await loadMobileSession({ adapter, nativeBridge: signedOut })).toBeUndefined();
+
+  const failing = (status: number): FetchLike => async (input, init) =>
+    String(input).endsWith("/oauth/token") && init?.method === "POST"
+      ? new Response(null, { status })
+      : oidcFetch()(input, init);
+  const transient = memoryBridge();
+  await persistMobileSession({ adapter, nativeBridge: transient, session: base });
+  await expect(
+    refreshMobileSession({ adapter, nativeBridge: transient, session: base, fetch: failing(503) }),
+  ).rejects.toMatchObject({ name: "MobileSessionRefreshError", status: 503, rejected: false });
+  expect((await loadMobileSession({ adapter, nativeBridge: transient }))?.accessToken).toBe("expired-access");
+
+  await expect(
+    refreshMobileSession({ adapter, nativeBridge: transient, session: base, fetch: failing(400) }),
+  ).rejects.toMatchObject({ status: 400, rejected: true });
+  expect(await loadMobileSession({ adapter, nativeBridge: transient })).toBeUndefined();
+});
+
+test("a rotation for a signed-out account is revoked instead of kept", async () => {
+  const revoked: string[] = [];
+  const fetch: FetchLike = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/.well-known/openid-configuration")) {
+      return Response.json({
+        issuer: "https://host.example",
+        authorization_endpoint: "https://host.example/oauth/authorize",
+        token_endpoint: "https://host.example/oauth/token",
+        revocation_endpoint: "https://host.example/oauth/revoke",
+      });
+    }
+    if (url.endsWith("/oauth/token")) {
+      return Response.json({ access_token: "rotated-access", refresh_token: "rotated-refresh", token_type: "Bearer", expires_in: 300 });
+    }
+    if (url.endsWith("/oauth/revoke")) {
+      revoked.push(new URLSearchParams(String(init?.body)).get("token") ?? "");
+      return new Response(null, { status: 200 });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const bridge = memoryBridge();
+  await refreshMobileSession({
+    adapter,
+    nativeBridge: bridge,
+    session: {
+      hostUrl: "https://host.example",
+      product: "takos",
+      oidcIssuer: "https://host.example",
+      oidcClientId: "takos-mobile-host-example",
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      tokenType: "Bearer",
+      createdAt: "2026-10-30T00:00:00.000Z",
+    },
+    fetch,
+  });
+  expect(await loadMobileSession({ adapter, nativeBridge: bridge })).toBeUndefined();
+  expect(revoked).toEqual(["rotated-refresh", "rotated-access"]);
+});

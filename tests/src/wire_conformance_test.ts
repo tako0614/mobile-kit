@@ -179,10 +179,9 @@ test("the missing oidcClientId is reported at discovery, not at the OIDC call", 
   const reported = (discovery.wireViolations ?? []).map(
     (violation) => violation.requirement,
   );
-  expect(reported.sort()).toEqual([
-    "oidc-host-advertises-a-mobile-client-id",
-    "oidc-issuer-is-actually-an-issuer",
-  ]);
+  // Discovery no longer reads the retired /v1/capabilities document, so only
+  // the product document's own defect is reported here.
+  expect(reported.sort()).toEqual(["oidc-host-advertises-a-mobile-client-id"]);
   expect(
     (discovery.wireViolations ?? []).every(
       (violation) => violation.blocks === "sign-in",

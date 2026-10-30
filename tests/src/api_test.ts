@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   createMobileApiClient,
+  resolveMobileApiUrl,
   MobileApiError,
   NOTIFICATION_PUSHER_REGISTRATION_PATH,
   registerNotificationPusherWithHost,
@@ -344,3 +345,41 @@ function json(value: unknown): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+test("an API client with a base path follows the session's same-origin API root", async () => {
+  const requested: string[] = [];
+  const session = {
+    hostUrl: "https://a.example",
+    product: "takosumi" as const,
+    apiBaseUrl: "https://a.example/control/v1",
+    accessToken: "a-access",
+    tokenType: "Bearer",
+    createdAt: "2026-10-30T00:00:00.000Z",
+  };
+  const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    requested.push(String(input));
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer a-access");
+    return Response.json({ ok: true });
+  };
+  await createMobileApiClient({ session, fetch, apiBasePath: "/api/v1" }).json("/apps?limit=1");
+  // Without an advertised root, the fallback path on the host is used.
+  await createMobileApiClient({
+    session: { ...session, apiBaseUrl: undefined },
+    fetch,
+    apiBasePath: "/api/v1",
+  }).json("/apps");
+  // An API root on another origin is ignored rather than followed.
+  await createMobileApiClient({
+    session: { ...session, apiBaseUrl: "https://collector.example/api/v1" },
+    fetch,
+    apiBasePath: "/api/v1",
+  }).json("/apps");
+  expect(requested).toEqual([
+    "https://a.example/control/v1/apps?limit=1",
+    "https://a.example/api/v1/apps",
+    "https://a.example/api/v1/apps",
+  ]);
+  expect(() =>
+    resolveMobileApiUrl(session, "//collector.example/apps", "/api/v1"),
+  ).toThrow("absolute path");
+});

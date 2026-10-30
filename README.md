@@ -72,12 +72,40 @@ UI.
 - Build Takosumi App Handoff / Host Center links from product-local source
   coordinates plus a return URI. A product key alone is never an install target.
 - Preserve App Handoff setup payloads through discovery state.
-- Discover host capabilities through `.well-known` and capabilities endpoints.
+- Discover hosts through `/.well-known/<product>` and, for Takosumi-shaped
+  hosts, `/.well-known/takosumi` (read once when it is the product document).
+  The retired `/v1/capabilities` document is no longer requested. A host's
+  `apiBaseUrl` is kept only when it is on the host's own origin, and
+  `createMobileApiClient({ session, apiBasePath })` resolves request paths
+  against it (falling back to `apiBasePath` on the host).
 - Build OIDC authorization URLs and token exchanges with PKCE material. The
   issuer must be advertised explicitly; discovery validates issuer equality,
   required endpoints, and HTTPS endpoint transport.
 - Store pending sign-in requests and mobile sessions through the native bridge
   store. Pending sign-in requests expire after ten minutes.
+- Keep one session per (host origin, account): each session has its own
+  credential-store slot, while the list of saved accounts (host, label, last
+  use, which one is active) is non-secret and lives in normal persistence. The
+  account subject comes from the ID token when its `iss` and `aud` match the
+  sign-in. One account is active at a time; the shared shell shows the current
+  host and account, switches between saved accounts, adds another host without
+  signing out, and shows a connect link for another host instead of hiding it.
+  A slot that names a different host or account than its row is discarded, so
+  one host's token is never handed out for another. The pre-multi-account
+  single session is migrated into the list on first load, so existing installs
+  stay signed in.
+- `MobileProductAdapter.requireHostIssuer`: for shells whose issuer tokens are
+  credentials for the host's own API (Takosumi Mobile), sign-in starts only
+  when the issuer is the host (same origin) or the issuer's own
+  `/.well-known/takosumi` names the host as its API. A host that names another
+  instance's issuer cannot obtain that instance's tokens through a genuine
+  consent there.
+- Sign out one account at a time: the controller revokes the host session
+  (`mobileLogout`) or, for issuer-minted sessions, both tokens at the session
+  issuer's own `revocation_endpoint` (RFC 7009), forgets that account, and
+  continues with the most recently used remaining one. Token rotation from a
+  refresh is saved to the account it belongs to and never brings back an
+  account signed out meanwhile.
 - Keep a product-local recent host list in normal persistent storage so
   mobile clients can reconnect to known product hosts
   without retyping URLs, and let users remove one remembered host or clear the
