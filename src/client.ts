@@ -5,6 +5,7 @@ import type {
   MobileAccountSummary,
   MobileBiometricPrompt,
   MobileConnectPayload,
+  MobileCustomSignIn,
   MobileProductAdapter,
   MobileKnownHost,
   MobilePushNotification,
@@ -157,6 +158,8 @@ export interface CreateMobileClientControllerOptions<Home = unknown> {
   readonly sessionUnlock?: MobileSessionUnlockOptions;
   readonly copy?: MobileClientCopy;
   readonly homeLabel?: string;
+  /** A product sign-in for the hosts it claims; see {@link MobileCustomSignIn}. */
+  readonly customSignIn?: MobileCustomSignIn;
 }
 
 export interface MobileClientActionResult {
@@ -414,6 +417,18 @@ export function createMobileClientController<Home = unknown>(
   }
 
   async function revokeSessionBestEffort(session: MobileSession) {
+    const customRevoke = options.customSignIn?.revokeSession;
+    if (customRevoke) {
+      let handled: boolean;
+      try {
+        handled = await customRevoke({ session, fetch: options.fetch });
+      } catch {
+        // Best effort, and never a reason to send the hook's credential to
+        // the standard issuer or host revocation instead.
+        handled = true;
+      }
+      if (handled) return;
+    }
     await Promise.allSettled([
       revokeMobileHostSession({ session, fetch: options.fetch }),
       revokeMobileOidcSession({ session, fetch: options.fetch }),
@@ -1082,15 +1097,24 @@ export function createMobileClientController<Home = unknown>(
       }
       publish({ status: copy.preparingSignInStatus });
       try {
-        const result = await beginMobileOidcSignIn({
-          adapter: options.adapter,
-          discovery: current,
-          nativeBridge: options.nativeBridge,
-          scope: normalizeOidcScopes(
-            options.oidcScopes ?? options.adapter.oidcScopes,
-          ),
-          fetch: options.fetch,
-        });
+        const custom = options.customSignIn?.handles(current)
+          ? options.customSignIn
+          : undefined;
+        const result = custom
+          ? await custom.begin({
+              discovery: current,
+              nativeBridge: options.nativeBridge,
+              fetch: options.fetch,
+            })
+          : await beginMobileOidcSignIn({
+              adapter: options.adapter,
+              discovery: current,
+              nativeBridge: options.nativeBridge,
+              scope: normalizeOidcScopes(
+                options.oidcScopes ?? options.adapter.oidcScopes,
+              ),
+              fetch: options.fetch,
+            });
         publish({ status: copy.openingSignInStatus });
         await options.nativeBridge.openExternalUrl(result.authorizationUrl);
       } catch (error) {
@@ -1131,13 +1155,25 @@ export function createMobileClientController<Home = unknown>(
       const completionEpoch = sessionLifecycleEpoch;
       publish({ status: "Completing sign-in..." });
       try {
-        const session = await completeMobileOidcSignIn({
-          adapter: options.adapter,
-          nativeBridge: options.nativeBridge,
-          callbackUrl,
-          persistSession: false,
-          fetch: options.fetch,
-        });
+        const custom = options.customSignIn
+          ? await options.customSignIn.complete({
+              callbackUrl,
+              nativeBridge: options.nativeBridge,
+              fetch: options.fetch,
+            })
+          : undefined;
+        if (custom && custom.product !== options.adapter.product) {
+          throw new Error("Mobile session product does not match this app.");
+        }
+        const session =
+          custom ??
+          (await completeMobileOidcSignIn({
+            adapter: options.adapter,
+            nativeBridge: options.nativeBridge,
+            callbackUrl,
+            persistSession: false,
+            fetch: options.fetch,
+          }));
         if (!(await commitSignedInSession(session, completionEpoch))) return;
         await activateSession(session, copy.signedInStatus, completionEpoch);
       } catch (error) {
