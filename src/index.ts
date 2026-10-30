@@ -168,6 +168,7 @@ export {
   type SetActiveMobileAccountInput,
 } from "./accounts.ts";
 export {
+  assertHostIssuerBinding,
   beginMobileOidcSignIn,
   clearMobileCredentials,
   clearMobileSession,

@@ -36,7 +36,13 @@ import {
   sameOriginApiBaseUrl,
   saveMobileAccountSession,
 } from "./accounts.ts";
-import { requireSecureWebUrl } from "./url.ts";
+import { hostEndpoint, normalizeHostUrl, requireSecureWebUrl } from "./url.ts";
+import { fetchOptionalWire } from "./wire.ts";
+import {
+  TAKOSUMI_WELL_KNOWN_DECODER,
+  TAKOSUMI_WELL_KNOWN_PATH,
+  type TakosumiWellKnownDocument,
+} from "./contract/mobile-discovery.ts";
 
 export { mobileSessionStorageKey };
 
@@ -123,6 +129,13 @@ export async function beginMobileOidcSignIn(
 ): Promise<BeginMobileOidcSignInResult> {
   const oidcClientId = mobileClientId(input.discovery);
   const oidcIssuer = requireDiscoveryOidcIssuer(input.discovery);
+  if (input.adapter.requireHostIssuer) {
+    await assertHostIssuerBinding({
+      hostUrl: input.discovery.hostUrl,
+      issuer: oidcIssuer,
+      fetch: input.fetch,
+    });
+  }
   const metadata = await fetchOidcMetadata({
     issuer: oidcIssuer,
     fetch: input.fetch,
@@ -288,6 +301,46 @@ export async function revokeMobileHostSession(
     throw new Error(`Host sign-out failed: ${response.status}`);
   }
   return true;
+}
+
+/**
+ * Refuses an issuer that does not belong to the host. Used when the issuer's
+ * tokens are credentials for the host's own API: otherwise a host could name
+ * another instance's issuer, let the user approve a genuine consent there, and
+ * then receive that instance's access token on its own API.
+ */
+export async function assertHostIssuerBinding(input: {
+  readonly hostUrl: string;
+  readonly issuer: string;
+  readonly fetch?: FetchLike;
+}): Promise<void> {
+  const host = normalizeHostUrl(input.hostUrl);
+  const issuer = normalizeHostUrl(input.issuer);
+  if (issuer === host) return;
+  const fetcher = input.fetch ?? globalThis.fetch.bind(globalThis);
+  let document: TakosumiWellKnownDocument | undefined;
+  try {
+    document = await fetchOptionalWire(
+      fetcher,
+      hostEndpoint(issuer, TAKOSUMI_WELL_KNOWN_PATH),
+      TAKOSUMI_WELL_KNOWN_DECODER,
+    );
+  } catch {
+    document = undefined;
+  }
+  const servedOrigins = [document?.apiBaseUrl, document?.endpoints?.api]
+    .map((value) => {
+      try {
+        return typeof value === "string" ? new URL(value).origin : undefined;
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((origin): origin is string => origin !== undefined);
+  if (servedOrigins.includes(host)) return;
+  throw new Error(
+    `Sign-in stopped: ${host} names ${issuer} as its sign-in server, but that server does not serve ${host}. Its tokens are not sent to another server.`,
+  );
 }
 
 export interface RevokeMobileOidcSessionInput {

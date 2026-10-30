@@ -54,6 +54,14 @@ export interface MobileProductAdapter {
   readonly mobileScheme: string;
   /** Explicit OAuth/OIDC scopes required by this product shell. */
   readonly oidcScopes?: readonly string[];
+  /**
+   * The issuer's tokens are API credentials for the host itself (for example
+   * a Takosumi instance). Sign-in then starts only when the issuer is the host
+   * (same origin) or the issuer's own `/.well-known/takosumi` names the host as
+   * its API, so a host cannot point at another instance's issuer and receive
+   * that instance's tokens.
+   */
+  readonly requireHostIssuer?: boolean;
   readonly requiredHostCapabilities?: readonly string[];
 }
 

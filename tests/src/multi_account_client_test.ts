@@ -19,6 +19,7 @@ const adapter: MobileProductAdapter = {
   accentColor: "#f5483d",
   mobileScheme: "takosumi",
   oidcScopes: ["openid", "profile", "offline_access", "capsules:read", "capsules:write"],
+  requireHostIssuer: true,
 };
 
 interface Recorded {
@@ -339,4 +340,69 @@ test("a route link for another saved instance switches to it", async () => {
   expect(controller.getState().session?.hostUrl).toBe("https://a.example");
   expect(opened).toEqual(["https://a.example/runs/run_1"]);
   controller.stop();
+});
+
+test("a host that names another instance's issuer cannot start a sign-in", async () => {
+  const bridge = memoryBridge();
+  const requests: string[] = [];
+  const fetch: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    requests.push(url.toString());
+    if (url.origin === "https://evil.example" && url.pathname === "/.well-known/takosumi") {
+      return Response.json({
+        product: "takosumi",
+        oidcClientId: "takosumi-mobile",
+        apiBaseUrl: "https://evil.example/api/v1",
+        endpoints: { oidc_issuer: "https://victim.example" },
+      });
+    }
+    if (url.origin === "https://victim.example" && url.pathname === "/.well-known/takosumi") {
+      return Response.json({
+        product: "takosumi",
+        oidcClientId: "takosumi-mobile",
+        apiBaseUrl: "https://victim.example/api/v1",
+        endpoints: { api: "https://victim.example/api/v1", oidc_issuer: "https://victim.example" },
+      });
+    }
+    if (url.pathname === "/.well-known/openid-configuration") {
+      return Response.json({
+        issuer: url.origin,
+        authorization_endpoint: `${url.origin}/oauth/authorize`,
+        token_endpoint: `${url.origin}/oauth/token`,
+      });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const controller = createMobileClientController({
+    adapter: { ...adapter, requireHostIssuer: true },
+    nativeBridge: bridge,
+    fetch,
+  });
+  await controller.start();
+  await controller.connectWithInput("evil.example");
+  expect(controller.getState().discovery?.oidcIssuer).toBe("https://victim.example");
+  await controller.startSignIn();
+  expect(bridge.opened).toEqual([]);
+  expect(controller.getState().status).toContain("Sign-in stopped");
+  expect(requests.some((url) => url.startsWith("https://victim.example/.well-known/openid-configuration"))).toBe(false);
+  controller.stop();
+});
+
+test("a separate issuer that names the host as its API may sign in", async () => {
+  const { assertHostIssuerBinding } = await import("../../src/index.ts");
+  const fetch: FetchLike = async (input) => {
+    const url = new URL(String(input));
+    if (url.origin === "https://accounts.example" && url.pathname === "/.well-known/takosumi") {
+      return Response.json({ product: "takosumi", apiBaseUrl: "https://app.example/api/v1" });
+    }
+    return new Response(null, { status: 404 });
+  };
+  await assertHostIssuerBinding({ hostUrl: "https://app.example", issuer: "https://app.example/", fetch });
+  await assertHostIssuerBinding({ hostUrl: "https://app.example", issuer: "https://accounts.example", fetch });
+  await expect(
+    assertHostIssuerBinding({ hostUrl: "https://other.example", issuer: "https://accounts.example", fetch }),
+  ).rejects.toThrow("does not serve https://other.example");
+  await expect(
+    assertHostIssuerBinding({ hostUrl: "https://app.example", issuer: "https://silent.example", fetch }),
+  ).rejects.toThrow("Sign-in stopped");
 });

@@ -94,6 +94,12 @@ UI.
   one host's token is never handed out for another. The pre-multi-account
   single session is migrated into the list on first load, so existing installs
   stay signed in.
+- `MobileProductAdapter.requireHostIssuer`: for shells whose issuer tokens are
+  credentials for the host's own API (Takosumi Mobile), sign-in starts only
+  when the issuer is the host (same origin) or the issuer's own
+  `/.well-known/takosumi` names the host as its API. A host that names another
+  instance's issuer cannot obtain that instance's tokens through a genuine
+  consent there.
 - Sign out one account at a time: the controller revokes the host session
   (`mobileLogout`) or, for issuer-minted sessions, both tokens at the session
   issuer's own `revocation_endpoint` (RFC 7009), forgets that account, and
