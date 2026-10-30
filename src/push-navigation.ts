@@ -1,6 +1,25 @@
 import type { MobilePushNotificationCallbackInput } from "./client.ts";
+import {
+  isSafeMobileRoutePath,
+  type MobileRouteSafetyOptions,
+} from "./route-safety.ts";
 
+/**
+ * The same-origin host route a tapped notification asks for, or undefined.
+ * The route goes through the same screening as screen links: another origin,
+ * another scheme, control characters or credential-named parameters drop it.
+ */
 export function resolvePushNotificationPath(
+  input: MobilePushNotificationCallbackInput,
+  options: MobileRouteSafetyOptions = {},
+): string | undefined {
+  const path = rawPushNotificationPath(input);
+  return path !== undefined && isSafeMobileRoutePath(path, options)
+    ? path
+    : undefined;
+}
+
+function rawPushNotificationPath(
   input: MobilePushNotificationCallbackInput,
 ): string | undefined {
   const value = firstString(
@@ -18,6 +37,7 @@ export function resolvePushNotificationPath(
   if (value.startsWith("/")) return value;
   try {
     const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return undefined;
     if (url.origin !== new URL(input.session.hostUrl).origin) return undefined;
     return `${url.pathname}${url.search}${url.hash}`;
   } catch {

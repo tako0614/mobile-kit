@@ -700,8 +700,17 @@ export function createMobileClientController<Home = unknown>(
         connectInput: route.hostUrl,
         status: copy.routePendingStatus,
       });
-      await connectToInput(route.hostUrl, true);
-      publish({ status: copy.routePendingStatus });
+      const outcome = await connectToInput(route.hostUrl, true);
+      if (outcome === "failed") {
+        // The host could not be reached, so there is nothing to confirm or
+        // dismiss. Drop the screen rather than open it later, when that host
+        // is chosen for another reason. The connect error stays the status.
+        if (state.pendingRoute === route) publish({ pendingRoute: undefined });
+        return;
+      }
+      if (outcome !== "superseded") {
+        publish({ status: copy.routePendingStatus });
+      }
       return;
     }
 
@@ -769,7 +778,15 @@ export function createMobileClientController<Home = unknown>(
     }
   }
 
-  async function connectToInput(input: string, preservePendingRoute = false) {
+  /**
+   * Discovers a host from a URL or connect payload. The host is remembered
+   * in the recent list only after a sign-in to it succeeds (activateSession),
+   * not when a link merely names it.
+   */
+  async function connectToInput(
+    input: string,
+    preservePendingRoute = false,
+  ): Promise<"discovered" | "already-connected" | "failed" | "superseded"> {
     const connectEpoch = ++connectionEpoch;
     connectionAbortController?.abort();
     const abortController = new AbortController();
@@ -805,7 +822,7 @@ export function createMobileClientController<Home = unknown>(
         // A connect link for the host already in use just opens the app: there
         // is nothing to sign in to or switch, so no "another host" prompt.
         publish({ status: copy.alreadyConnectedStatus });
-        return;
+        return "already-connected";
       }
       const discovery = await discoverHost({
         hostUrl: payload.hostUrl,
@@ -816,33 +833,32 @@ export function createMobileClientController<Home = unknown>(
         fetch: options.fetch,
         signal: abortController.signal,
       });
-      if (connectEpoch !== connectionEpoch) return;
+      if (connectEpoch !== connectionEpoch) return "superseded";
       requireHostCapabilities(
         discovery,
         options.adapter.requiredHostCapabilities,
       );
-      const knownHosts = await rememberKnownHost(discovery);
-      if (connectEpoch !== connectionEpoch) return;
       publish({
         connectPayload: payload,
         discovery,
-        knownHosts,
         status: payload.setupTicket
           ? `${copy.discoveredStatus} Unverified setup reference received.`
           : copy.discoveredStatus,
       });
+      return "discovered";
     } catch (error) {
       if (
         connectEpoch !== connectionEpoch ||
         isMobileAbortError(error) ||
         abortController.signal.aborted
       ) {
-        return;
+        return "superseded";
       }
       publish({
         connectPayload: undefined,
         status: mobileErrorMessage(error, "Host connection failed."),
       });
+      return "failed";
     } finally {
       if (connectionAbortController === abortController) {
         connectionAbortController = undefined;

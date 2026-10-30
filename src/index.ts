@@ -130,6 +130,14 @@ export {
   parseMobileRouteInput,
 } from "./handoff.ts";
 export {
+  assertSafeMobileRoutePath,
+  isSafeMobileRoutePath,
+  MAX_MOBILE_ROUTE_PATH_LENGTH,
+  type MobileRouteSafetyOptions,
+} from "./route-safety.ts";
+export { resolvePushNotificationPath } from "./push-navigation.ts";
+export {
+  isFirstTimeMobileHost,
   clearMobileKnownHosts,
   loadMobileKnownHosts,
   mobileKnownHostsStorageKey,

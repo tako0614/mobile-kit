@@ -22,6 +22,7 @@ import type {
   NativeBridge,
 } from "./types.ts";
 import { normalizeHostUrl } from "./url.ts";
+import { isFirstTimeMobileHost } from "./known-hosts.ts";
 import {
   createMobileHostRouteUrl,
   openMobileHostRoute,
@@ -99,6 +100,8 @@ export interface MobileShellCopy<Home> {
   readonly signOutAccountLabel?: string;
   readonly switchToSavedAccountLabel?: string;
   readonly discoveredWhileSignedInHeading?: string;
+  /** Shown with a discovered host this device has never signed in to. */
+  readonly firstTimeHostWarning?: string;
   readonly signInToAddLabel?: string;
   readonly dismissDiscoveryLabel?: string;
   /** Shown instead of the sign-in button when the host advertises no mobile client. */
@@ -142,7 +145,9 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       const consumed = await props.handlePushNotification?.(input);
       if (consumed) return;
       if (input.kind !== "tapped") return;
-      const routePath = resolvePushNotificationPath(input);
+      const routePath = resolvePushNotificationPath(input, {
+        allowCodeParameter: props.adapter.allowRouteCodeParameter,
+      });
       if (routePath && props.openHostRoute) {
         await openMobileHostRoute(
           props.openHostRoute,
@@ -275,6 +280,16 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       (violation) =>
         violation.requirement === "oidc-host-advertises-a-mobile-client-id",
     );
+  function FirstTimeHostWarning(warning: { readonly hostUrl: string }) {
+    return (
+      <Show when={isFirstTimeMobileHost(state(), warning.hostUrl)}>
+        <p class="status first-time-host" role="note">
+          {props.copy.firstTimeHostWarning ??
+            "初めての接続先です。URLが正しく信頼できる接続先か確かめてから、サインインしてください。"}
+        </p>
+      </Show>
+    );
+  }
   const showSetup = () =>
     (!state().session || state().addingAccount) && !state().lockedSession;
   const savedAccountForHost = (hostUrl: string | undefined) => {
@@ -558,6 +573,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
         {(current) => (
           <section class="result-panel">
             <h2>{props.copy.discoveredHeading}</h2>
+            <FirstTimeHostWarning hostUrl={current().hostUrl} />
             <dl>
               <div>
                 <dt>Host</dt>
@@ -701,6 +717,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                 "別の接続先が見つかりました"}
             </h2>
             <p>{found().hostUrl}</p>
+            <FirstTimeHostWarning hostUrl={found().hostUrl} />
             <div class="panel-actions">
               <Show
                 when={savedAccountForHost(found().hostUrl)}

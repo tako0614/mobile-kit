@@ -128,8 +128,8 @@ test("parseMobileRouteInput refuses paths that leave the host or carry credentia
     ["yurucommu://open?path=%2F%5Cevil.example%2Fx&host_url=https%3A%2F%2Fy.example", "same-origin"],
     ["yurucommu://open?path=%2F%5C%5Cevil.example", "same-origin"],
     ["yurucommu://open?path=%2F%2Fevil.example", "same-origin"],
-    ["yurucommu://open?path=javascript%3Aalert(1)", "same-origin"],
-    ["yurucommu://open?path=data%3Atext%2Fhtml%2Cx", "same-origin"],
+    ["yurucommu://open?path=javascript%3Aalert(1)", "http or https"],
+    ["yurucommu://open?path=data%3Atext%2Fhtml%2Cx", "http or https"],
     // Whitespace and control characters.
     ["yurucommu://open?path=%2Ffeed%0Ax", "control characters"],
     ["yurucommu://open?path=%2Ffe%09ed", "control characters"],
@@ -173,4 +173,96 @@ test("parseMobileRouteInput keeps ordinary same-origin paths", () => {
   expect(
     parseMobileRouteInput("yurucommu://open?path=%2F%252F%252Fevil", adapter)?.path,
   ).toBe("/%2F%2Fevil");
+});
+
+test("parseMobileRouteInput only reads web URLs as route URLs", () => {
+  const adapter = { mobileScheme: "yurucommu", product: "yurucommu" };
+  for (const value of [
+    "ftp://y.example/x",
+    "yurucommu://open?path=/",
+    "file:///etc/passwd",
+    "blob:https://y.example/1",
+    "about:blank",
+  ]) {
+    expect(
+      () => parseMobileRouteInput(`yurucommu://open?url=${encodeURIComponent(value)}`, adapter),
+      value,
+    ).toThrow("http or https");
+  }
+});
+
+test("parseMobileRouteInput screens credential names like Takosumi does, and more", () => {
+  const adapter = { mobileScheme: "yurucommu", product: "yurucommu" };
+  const refused = [
+    "/?auth_token=t",
+    "/?oauth_token=t",
+    "/?oauth_verifier=v",
+    "/?setup_ticket=s",
+    "/?ticket=ST-1",
+    "/?X-Amz-Signature=s",
+    "/?X-Amz-Date=20260101T000000Z",
+    "/?x-goog-credential=c",
+    "/?signing_key=k",
+    "/?client_assertion=a",
+    "/?SAMLResponse=r",
+    "/?csrfToken=t",
+    "/?a=1;code=x",
+    "/?a=1;Session_Id=x",
+    "/files;jsessionid=abc/list",
+    "/x;PHPSESSID=abc",
+    "/#/callback?code=x",
+    "/#!/cb?access_token=t",
+    "/#state=s&id_token=t",
+    "/?%2561ccess_token=t",
+    "/?access%5Ftoken=t",
+    "/join?code=abc",
+  ];
+  for (const path of refused) {
+    expect(
+      () => parseMobileRouteInput(`yurucommu://open?path=${encodeURIComponent(path)}`, adapter),
+      path,
+    ).toThrow("must not carry credentials");
+  }
+  const kept = [
+    "/docs#code",
+    "/docs#session",
+    "/settings#token-help",
+    "/?pageToken=abc&nextPageToken=def",
+    "/?continuationToken=c",
+    "/?token=",
+    "/?code",
+    "/search?q=password+reset",
+    "/users/session-notes",
+  ];
+  for (const path of kept) {
+    expect(
+      parseMobileRouteInput(`yurucommu://open?path=${encodeURIComponent(path)}`, adapter)?.path,
+      path,
+    ).toBe(path);
+  }
+});
+
+test("a product can accept invite codes in routes, never on OAuth paths", () => {
+  const adapter = {
+    mobileScheme: "yurucommu",
+    product: "yurucommu",
+    allowRouteCodeParameter: true,
+  };
+  expect(
+    parseMobileRouteInput("yurucommu://open?path=%2Fjoin%3Fcode%3Dabc", adapter)?.path,
+  ).toBe("/join?code=abc");
+  expect(
+    parseMobileRouteInput("yurucommu://open?path=%2F%23%2Fjoin%3Fcode%3Dabc", adapter)?.path,
+  ).toBe("/#/join?code=abc");
+  for (const path of [
+    "/oauth/callback?code=x",
+    "/auth/callback?code=x",
+    "/oauth2/authorize?code=x",
+    "/join?code=abc&token=t",
+  ]) {
+    expect(
+      () => parseMobileRouteInput(`yurucommu://open?path=${encodeURIComponent(path)}`, adapter),
+      path,
+    ).toThrow("must not carry credentials");
+  }
 });
