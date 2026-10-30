@@ -167,6 +167,7 @@ export function parseOidcCallback(
   expectedState: string,
   expectedRedirectUri?: string,
   expectedIssuer?: string,
+  requireIssuer = false,
 ): OidcCallbackResult {
   const url = new URL(callbackUrl);
   if (
@@ -183,6 +184,9 @@ export function parseOidcCallback(
   // RFC 9207: when the server names the issuer of the response, it must be
   // the issuer this sign-in started with.
   const responseIssuer = url.searchParams.get("iss");
+  if (requireIssuer && responseIssuer === null) {
+    throw new Error("OIDC callback does not name its issuer.");
+  }
   if (responseIssuer !== null && expectedIssuer !== undefined) {
     let matches = false;
     try {

@@ -207,11 +207,14 @@ export async function completeMobileOidcSignIn(
   );
   if (!request) throw new Error("No pending mobile sign-in request.");
 
+  // Host-API shells require the issuer to name itself (RFC 9207), so a code
+  // from an issuer that does not can never complete their sign-in.
   const callback = parseOidcCallback(
     input.callbackUrl,
     request.state,
     request.redirectUri,
     request.oidcIssuer,
+    input.adapter.requireHostIssuer === true,
   );
   const metadata = await fetchOidcMetadata({
     issuer: request.oidcIssuer,
@@ -488,13 +491,16 @@ export async function refreshMobileSession(
     // A rotation is saved only to an account that is still saved, so a refresh
     // finishing after sign-out cannot bring the account back. It never
     // displaces the active account.
-    await saveMobileAccountSession({
+    const saved = await saveMobileAccountSession({
       adapter: input.adapter,
       nativeBridge: input.nativeBridge,
       session,
       activate: "if-none",
       onlyIfExisting: true,
     });
+    // The account was signed out while refreshing: the rotated tokens are not
+    // kept, so revoke them instead of leaving them valid on the server.
+    if (!saved) await revokeMobileOidcSession({ session, fetch: input.fetch }).catch(() => false);
   }
   return session;
 }

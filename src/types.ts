@@ -59,7 +59,8 @@ export interface MobileProductAdapter {
    * a Takosumi instance). Sign-in then starts only when the issuer is the host
    * (same origin) or the issuer's own `/.well-known/takosumi` names the host as
    * its API, so a host cannot point at another instance's issuer and receive
-   * that instance's tokens.
+   * that instance's tokens. The sign-in callback must then also carry the
+   * RFC 9207 `iss` parameter naming that issuer.
    */
   readonly requireHostIssuer?: boolean;
   readonly requiredHostCapabilities?: readonly string[];

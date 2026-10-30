@@ -161,7 +161,7 @@ async function signInVia(
   );
   expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
   await controller.completeSignIn(
-    `takosumi://oauth/callback?code=code&state=${authorize.searchParams.get("state")}`,
+    `takosumi://oauth/callback?code=code&state=${authorize.searchParams.get("state")}&iss=${encodeURIComponent(authorize.origin)}`,
   );
 }
 
@@ -437,5 +437,22 @@ test("a host that is its own issuer cannot route authorize to another issuer (mi
   expect(bridge.opened).toEqual([]);
   expect(controller.getState().status).toContain("issuer's origin");
   expect(requests.some((url) => url.includes("victim.example") || url.endsWith("/steal"))).toBe(false);
+  controller.stop();
+});
+
+test("a host-API shell refuses a callback that does not name its issuer", async () => {
+  const bridge = memoryBridge();
+  const { fetch, requests } = instances();
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await controller.startSignIn();
+  const authorize = new URL(bridge.opened.at(-1)!);
+  await controller.completeSignIn(
+    `takosumi://oauth/callback?code=code&state=${authorize.searchParams.get("state")}`,
+  );
+  expect(controller.getState().session).toBeUndefined();
+  expect(controller.getState().status).toContain("does not name its issuer");
+  expect(requests.some((r) => r.url.endsWith("/oauth/token"))).toBe(false);
   controller.stop();
 });

@@ -935,3 +935,44 @@ test("a refresh never revives a signed-out account and only an issuer refusal dr
   ).rejects.toMatchObject({ status: 400, rejected: true });
   expect(await loadMobileSession({ adapter, nativeBridge: transient })).toBeUndefined();
 });
+
+test("a rotation for a signed-out account is revoked instead of kept", async () => {
+  const revoked: string[] = [];
+  const fetch: FetchLike = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/.well-known/openid-configuration")) {
+      return Response.json({
+        issuer: "https://host.example",
+        authorization_endpoint: "https://host.example/oauth/authorize",
+        token_endpoint: "https://host.example/oauth/token",
+        revocation_endpoint: "https://host.example/oauth/revoke",
+      });
+    }
+    if (url.endsWith("/oauth/token")) {
+      return Response.json({ access_token: "rotated-access", refresh_token: "rotated-refresh", token_type: "Bearer", expires_in: 300 });
+    }
+    if (url.endsWith("/oauth/revoke")) {
+      revoked.push(new URLSearchParams(String(init?.body)).get("token") ?? "");
+      return new Response(null, { status: 200 });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const bridge = memoryBridge();
+  await refreshMobileSession({
+    adapter,
+    nativeBridge: bridge,
+    session: {
+      hostUrl: "https://host.example",
+      product: "takos",
+      oidcIssuer: "https://host.example",
+      oidcClientId: "takos-mobile-host-example",
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      tokenType: "Bearer",
+      createdAt: "2026-10-30T00:00:00.000Z",
+    },
+    fetch,
+  });
+  expect(await loadMobileSession({ adapter, nativeBridge: bridge })).toBeUndefined();
+  expect(revoked).toEqual(["rotated-refresh", "rotated-access"]);
+});

@@ -380,15 +380,17 @@ export function createMobileClientController<Home = unknown>(
   }
 
   async function persistRefreshedSession(session: MobileSession) {
-    await enqueueSessionStorageOperation(async () => {
+    const saved = await enqueueSessionStorageOperation(async () =>
       await saveMobileAccountSession({
         adapter: options.adapter,
         nativeBridge: options.nativeBridge,
         session,
         activate: false,
         onlyIfExisting: true,
-      });
-    });
+      }),
+    );
+    // Signed out during the refresh: revoke the rotated tokens.
+    if (!saved) await revokeSessionBestEffort(session);
   }
 
   async function loadAccountList(): Promise<MobileAccountList> {
