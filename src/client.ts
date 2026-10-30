@@ -319,10 +319,18 @@ export function createMobileClientController<Home = unknown>(
       await unregisterPushBestEffort(previousSession, previousPushRegistration);
       if (epoch !== sessionLifecycleEpoch) return;
     }
+    const knownHosts = await rememberKnownHost(session);
+    const accountList = accountListState(await loadAccountList());
     publish({
       session,
-      knownHosts: await rememberKnownHost(session),
-      ...accountListState(await loadAccountList()),
+      knownHosts,
+      ...accountList,
+      // The host just signed in to (or switched to) is no longer "another host":
+      // keep a discovery only when it names a different host, such as a connect
+      // link that arrived meanwhile.
+      ...(state.discovery && sameHost(state.discovery.hostUrl, session.hostUrl)
+        ? { discovery: undefined, connectPayload: undefined }
+        : {}),
       addingAccount: false,
       lockedSession: undefined,
       unlockLoading: false,
@@ -1386,6 +1394,14 @@ function normalizeOidcScopes(scopes: readonly string[] | undefined) {
     .flatMap((scope) => scope.trim().split(/\s+/u))
     .filter(Boolean);
   return normalized.length > 0 ? [...new Set(normalized)].join(" ") : undefined;
+}
+
+function sameHost(left: string, right: string): boolean {
+  try {
+    return normalizeHostUrl(left) === normalizeHostUrl(right);
+  } catch {
+    return false;
+  }
 }
 
 function requireHostCapabilities(

@@ -136,7 +136,8 @@ UI.
 - A connect link for the host already in use (signed in or locked, and not
   while adding an account) just opens the app: no "another host" prompt and no
   discovery request. A connect link for another host is shown as discovered,
-  and switching or signing in is the user's choice.
+  and switching or signing in is the user's choice. Once the user signs in to
+  (or switches to) that host, it is no longer offered as another host.
 - `MobileProductAdapter.confirmRouteAccountSwitch`: a route link for another
   saved host no longer switches the active account by itself. The host is shown
   as discovered (with "switch to the saved account" in the shared shell), the

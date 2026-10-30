@@ -575,3 +575,30 @@ test("dismissing the prompt drops the pending route", async () => {
   expect(opened).toEqual([]);
   controller.stop();
 });
+
+test("the host just signed in to or added is not offered again as another host", async () => {
+  const bridge = memoryBridge();
+  const { fetch } = instances();
+  const controller = createMobileClientController({ adapter, nativeBridge: bridge, fetch });
+  await controller.start();
+  await controller.connectWithInput("a.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  expect(controller.getState().discovery).toBeUndefined();
+
+  // Added from a connect link while signed in.
+  await controller.handleLaunchPayload("takosumi://connect?host_url=https%3A%2F%2Fb.example");
+  expect(controller.getState().discovery?.hostUrl).toBe("https://b.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+  expect(controller.getState().discovery).toBeUndefined();
+
+  // Added through "add account".
+  controller.addAccount();
+  await controller.connectWithInput("c.example");
+  await signInVia(controller, bridge);
+  expect(controller.getState().session?.hostUrl).toBe("https://c.example");
+  expect(controller.getState().addingAccount).toBe(false);
+  expect(controller.getState().discovery).toBeUndefined();
+  controller.stop();
+});
