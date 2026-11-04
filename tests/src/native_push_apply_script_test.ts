@@ -89,6 +89,35 @@ for (const kotlinDsl of [true, false]) {
   });
 }
 
+for (const dictionary of ["<dict/>", "<dict />"]) {
+  test(`Apple push wiring handles XcodeGen's empty ${dictionary} plist`, () => {
+    const appDir = mkdtempSync(path.join(tmpdir(), "takos-mobile-push-empty-"));
+    try {
+      seedGeneratedNativeProject(appDir);
+      const file = "src-tauri/gen/apple/App.entitlements";
+      write(appDir, file, `<?xml version="1.0"?><plist version="1.0">\n${dictionary}\n</plist>\n`);
+      const apply = (environment: string, extra: string[] = []) => spawnSync("bun", [
+        scriptPath, "--app-dir", appDir, "--platform", "ios",
+        "--apple-environment", environment, "--strict", ...extra,
+      ], { encoding: "utf8" });
+      const result = apply("development");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("iOS aps-environment entitlement updated");
+      const updated = read(appDir, file);
+      expect(updated).toContain("<key>aps-environment</key>\n\t<string>development</string>");
+      expect(updated.match(/<key>aps-environment<\/key>/g)).toHaveLength(1);
+      expect(apply("development").status).toBe(0);
+      expect(read(appDir, file)).toBe(updated);
+      expect(apply("production", ["--dry-run"]).status).toBe(1);
+      expect(read(appDir, file)).toBe(updated);
+      expect(apply("production").status).toBe(0);
+      expect(read(appDir, file)).toContain("<string>production</string>");
+    } finally {
+      rmSync(appDir, { recursive: true, force: true });
+    }
+  });
+}
+
 test("native push apply script patches generated iOS and Android projects", () => {
   const appDir = mkdtempSync(path.join(tmpdir(), "takos-mobile-push-"));
   try {
