@@ -240,6 +240,13 @@ UI.
 - Provide a shared Tauri mobile doctor script used by product shells to validate config, capability permissions, app icons, plugin wiring, and native toolchain readiness.
 - Provide a shared native-init wrapper that runs Tauri Android/iOS generation and
   immediately applies the selected product project's non-secret push wiring.
+  Android Google Services is applied only when `google-services.json` exists, so
+  ordinary debug builds can precede Firebase setup. Migration targets standard
+  generated Gradle layouts; custom Google Services references or unknown
+  `apply from` scripts are refused before mutation and need owner-managed wiring.
+  Known generated `tauri.build.gradle(.kts)` scripts are inspected as well.
+  Strict verification and release checks still require product-owned Firebase
+  configuration; a debug build does not qualify push delivery.
   Provider files, signing, and device evidence remain product/operator-owned.
 - Validate one release-evidence contract from both the strict evidence gate and
   the non-failing status reporter, so a status cannot report ready while signing,
