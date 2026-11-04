@@ -180,9 +180,11 @@ function patchProjectGradle(text, kotlinDsl) {
 }
 
 function patchAppGradle(text, kotlinDsl) {
-  const pluginLine = kotlinDsl
-    ? '    id("com.google.gms.google-services")'
-    : "    id 'com.google.gms.google-services'";
+  // The native plugin reports push_unavailable without Firebase configuration.
+  // Keep debug app builds usable then; release verification still requires it.
+  const conditionalPlugin = kotlinDsl
+    ? 'if (file("google-services.json").exists()) {\n    apply(plugin = "com.google.gms.google-services")\n}'
+    : "if (file('google-services.json').exists()) {\n    apply plugin: 'com.google.gms.google-services'\n}";
   const bomLine = kotlinDsl
     ? '    implementation(platform("com.google.firebase:firebase-bom:34.15.0"))'
     : "    implementation platform('com.google.firebase:firebase-bom:34.15.0')";
@@ -192,17 +194,24 @@ function patchAppGradle(text, kotlinDsl) {
   const installationsLine = kotlinDsl
     ? '    implementation("com.google.firebase:firebase-installations")'
     : "    implementation 'com.google.firebase:firebase-installations'";
-  const current = text.replace(
+  const migrated = text.replace(
+    /^[ \t]*id\s*(?:\(\s*["']com\.google\.gms\.google-services["']\s*\)|["']com\.google\.gms\.google-services["'])[ \t]*(?:\/\/[^\n]*)?$/gm,
+    "",
+  );
+  const current = migrated.replace(
     /(com\.google\.firebase:firebase-bom:)[^"']+/g,
     (_, prefix) => `${prefix}34.15.0`,
   );
-  return ensureDependenciesLine(
+  const dependencies = ensureDependenciesLine(
     ensureDependenciesLine(
-      ensureDependenciesLine(ensurePluginsLine(current, pluginLine), bomLine),
+      ensureDependenciesLine(current, bomLine),
       installationsLine,
     ),
     messagingLine,
   );
+  return dependencies.includes(conditionalPlugin)
+    ? dependencies
+    : `${dependencies.trimEnd()}\n\n${conditionalPlugin}\n`;
 }
 
 function ensurePluginsLine(text, line) {
