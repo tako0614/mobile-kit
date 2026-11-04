@@ -197,7 +197,13 @@ function upsertApsEnvironment(xml, environment) {
       `$1${environment}$3`,
     );
   }
-  return xml.replace(
+  // XcodeGen serializes an empty entitlement dictionary as <dict/>. Expand
+  // only an empty root dictionary, leaving nested dictionaries untouched.
+  const expanded = xml.replace(
+    /(<plist\b[^>]*>\s*)<dict\s*\/>(\s*<\/plist>)/,
+    "$1<dict>\n</dict>$2",
+  );
+  return expanded.replace(
     /<\/dict>/,
     `\t<key>aps-environment</key>\n\t<string>${environment}</string>\n</dict>`,
   );
