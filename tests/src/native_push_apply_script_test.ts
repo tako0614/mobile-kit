@@ -17,6 +17,78 @@ const scriptPath = path.join(
   "mobile-kit/scripts/apply-tauri-mobile-push-native.mjs",
 );
 
+for (const kotlinDsl of [true, false]) {
+  test(`custom ${kotlinDsl ? "Kotlin" : "Groovy"} Google Services configuration is refused before any project mutation`, () => {
+    const appDir = mkdtempSync(path.join(tmpdir(), "takos-mobile-push-custom-"));
+    try {
+      seedGeneratedNativeProject(appDir);
+      const suffix = kotlinDsl ? ".gradle.kts" : ".gradle";
+      const appPath = `src-tauri/gen/android/app/build${suffix}`;
+      if (!kotlinDsl) {
+        rmSync(path.join(appDir, "src-tauri/gen/android/app/build.gradle.kts"));
+        rmSync(path.join(appDir, "src-tauri/gen/android/build.gradle.kts"));
+        write(appDir, "src-tauri/gen/android/build.gradle", "plugins {\n    id 'com.android.application' version '8.5.0' apply false\n}\n");
+      }
+      for (const configuration of [
+        "googleServices { disableVersionCheck = true }",
+        'extensions.getByName("googleServices")',
+        'tasks.named("processDebugGoogleServices")',
+        kotlinDsl ? 'apply(from = "firebase.gradle.kts")' : "apply from: 'firebase.gradle'",
+        kotlinDsl ? 'apply(from = "tauri.build.gradle.kts")' : "apply from: 'tauri.build.gradle'",
+      ]) {
+        write(appDir, `src-tauri/gen/android/app/tauri.build${suffix}`, "googleServices { disableVersionCheck = true }\n");
+        write(appDir, `src-tauri/gen/android/app/firebase${suffix}`, "googleServices { disableVersionCheck = true }\n");
+        const pluginLine = kotlinDsl ? '    id("com.google.gms.google-services")' : "    id 'com.google.gms.google-services'";
+        write(appDir, appPath, `plugins {\n${pluginLine}\n}\n${configuration}\n`);
+        const paths = [appPath, `src-tauri/gen/android/build${suffix}`, "src-tauri/gen/android/settings.gradle", "src-tauri/gen/apple/App.entitlements", `src-tauri/gen/android/app/tauri.build${suffix}`, `src-tauri/gen/android/app/firebase${suffix}`];
+        const before = paths.map((file) => read(appDir, file));
+        const result = spawnSync("bun", [scriptPath, "--app-dir", appDir, "--apple-environment", "development"], { encoding: "utf8" });
+        expect(result.status).toBe(1);
+        expect(result.stdout).toContain("refusing automatic migration before mutation");
+        expect(paths.map((file) => read(appDir, file))).toEqual(before);
+      }
+    } finally {
+      rmSync(appDir, { recursive: true, force: true });
+    }
+  });
+
+  test(`existing ${kotlinDsl ? "Kotlin" : "Groovy"} push wiring becomes conditional without relaxing strict verification`, () => {
+    const appDir = mkdtempSync(path.join(tmpdir(), "takos-mobile-push-migrate-"));
+    try {
+      seedGeneratedNativeProject(appDir);
+      rmSync(path.join(appDir, "src-tauri/gen/android/app/google-services.json"));
+      const suffix = kotlinDsl ? ".gradle.kts" : ".gradle";
+      const appPath = `src-tauri/gen/android/app/build${suffix}`;
+      if (!kotlinDsl) {
+        rmSync(path.join(appDir, "src-tauri/gen/android/app/build.gradle.kts"));
+        rmSync(path.join(appDir, "src-tauri/gen/android/build.gradle.kts"));
+        write(appDir, "src-tauri/gen/android/build.gradle", "plugins {\n    id 'com.android.application' version '8.5.0' apply false\n}\n");
+      }
+      const pluginLine = kotlinDsl ? '    id("com.google.gms.google-services")' : "    id 'com.google.gms.google-services'";
+      const generated = kotlinDsl ? 'apply(from = "tauri.build.gradle.kts")' : "apply from: 'tauri.build.gradle'";
+      write(appDir, `src-tauri/gen/android/app/tauri.build${suffix}`, "// Generated Tauri dependencies.\n");
+      write(appDir, appPath, `plugins {\n${pluginLine}\n}\n${generated}\n\ndependencies {\n}\n`);
+      const apply = () => spawnSync("bun", [scriptPath, "--app-dir", appDir, "--platform", "android"], { encoding: "utf8" });
+      const result = apply();
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("google-services.json is missing");
+      const migrated = read(appDir, appPath);
+      expect(migrated).not.toContain(pluginLine);
+      expect(migrated).toContain(kotlinDsl ? 'if (file("google-services.json").exists())' : "if (file('google-services.json').exists())");
+      expect(migrated).toContain(kotlinDsl ? 'apply(plugin = "com.google.gms.google-services")' : "apply plugin: 'com.google.gms.google-services'");
+      expect(read(appDir, `src-tauri/gen/android/build${suffix}`)).toContain("apply false");
+      expect(apply().status).toBe(0);
+      expect(read(appDir, appPath)).toBe(migrated);
+      const verify = spawnSync("bun", [scriptPath, "--app-dir", appDir, "--platform", "android", "--dry-run", "--strict"], { encoding: "utf8" });
+      expect(verify.status).toBe(1);
+      expect(verify.stdout).toContain("google-services.json is missing");
+      expect(read(appDir, appPath)).toBe(migrated);
+    } finally {
+      rmSync(appDir, { recursive: true, force: true });
+    }
+  });
+}
+
 test("native push apply script patches generated iOS and Android projects", () => {
   const appDir = mkdtempSync(path.join(tmpdir(), "takos-mobile-push-"));
   try {

@@ -29,6 +29,41 @@ if (
   process.exit(2);
 }
 
+// Dynamic apply does not provide Kotlin type-safe accessors, and would run
+// after eager Groovy configuration. Leave custom setups to their owner before
+// changing any generated file (including the independent Apple project).
+if (platform === "all" || platform === "android") {
+  for (const relative of [
+    "src-tauri/gen/android/app/build.gradle.kts",
+    "src-tauri/gen/android/app/build.gradle",
+  ]) {
+    const file = path.join(appDir, relative);
+    const problem = googleServicesPreflightProblem(file);
+    if (problem) {
+      fail(`${problem} in ${relative}; refusing automatic migration before mutation; keep this setup and wire Firebase manually`);
+      printResults();
+      process.exit(1);
+    }
+  }
+}
+
+function googleServicesPreflightProblem(file, visited = new Set()) {
+  if (!existsSync(file) || visited.has(file)) return undefined;
+  visited.add(file);
+  const text = readText(file);
+  if (/\b(?:googleServices|[A-Za-z0-9_]*GoogleServices[A-Za-z0-9_]*)\b/.test(text)) {
+    return "custom Google Services configuration";
+  }
+  for (const match of text.matchAll(/\bapply\s*(?:\(\s*from\s*=|from\s*:)/g)) {
+    const tail = text.slice(match.index + match[0].length);
+    const known = tail.match(/^[ \t]*["'](tauri\.build\.gradle(?:\.kts)?)["'](?=[ \t]*(?:\)|\r?\n|;|\/\/|$))/);
+    if (!known) return "unsupported external Gradle script";
+    const nested = googleServicesPreflightProblem(path.join(path.dirname(file), known[1]), visited);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
 if (platform === "all" || platform === "ios") {
   await applyApplePushEntitlement();
 }
@@ -180,9 +215,11 @@ function patchProjectGradle(text, kotlinDsl) {
 }
 
 function patchAppGradle(text, kotlinDsl) {
-  const pluginLine = kotlinDsl
-    ? '    id("com.google.gms.google-services")'
-    : "    id 'com.google.gms.google-services'";
+  // The native plugin reports push_unavailable without Firebase configuration.
+  // Keep debug app builds usable then; release verification still requires it.
+  const conditionalPlugin = kotlinDsl
+    ? 'if (file("google-services.json").exists()) {\n    apply(plugin = "com.google.gms.google-services")\n}'
+    : "if (file('google-services.json').exists()) {\n    apply plugin: 'com.google.gms.google-services'\n}";
   const bomLine = kotlinDsl
     ? '    implementation(platform("com.google.firebase:firebase-bom:34.15.0"))'
     : "    implementation platform('com.google.firebase:firebase-bom:34.15.0')";
@@ -192,17 +229,24 @@ function patchAppGradle(text, kotlinDsl) {
   const installationsLine = kotlinDsl
     ? '    implementation("com.google.firebase:firebase-installations")'
     : "    implementation 'com.google.firebase:firebase-installations'";
-  const current = text.replace(
+  const migrated = text.replace(
+    /^[ \t]*id\s*(?:\(\s*["']com\.google\.gms\.google-services["']\s*\)|["']com\.google\.gms\.google-services["'])[ \t]*(?:\/\/[^\n]*)?$/gm,
+    "",
+  );
+  const current = migrated.replace(
     /(com\.google\.firebase:firebase-bom:)[^"']+/g,
     (_, prefix) => `${prefix}34.15.0`,
   );
-  return ensureDependenciesLine(
+  const dependencies = ensureDependenciesLine(
     ensureDependenciesLine(
-      ensureDependenciesLine(ensurePluginsLine(current, pluginLine), bomLine),
+      ensureDependenciesLine(current, bomLine),
       installationsLine,
     ),
     messagingLine,
   );
+  return dependencies.includes(conditionalPlugin)
+    ? dependencies
+    : `${dependencies.trimEnd()}\n\n${conditionalPlugin}\n`;
 }
 
 function ensurePluginsLine(text, line) {
