@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { inspectMobileReleaseVersions } from "./mobile-release-versions.mjs";
+import { inspectAndroidDevScript } from "./android-dev-script.mjs";
 
 const args = parseArgs(process.argv.slice(2));
 const appDir = path.resolve(args.appDir ?? process.cwd());
@@ -273,13 +274,11 @@ function checkPackage(pkg) {
       "release native-push scripts explicitly require the APNs production entitlement",
     );
   }
+  const androidDev = inspectAndroidDevScript(pkg.scripts?.["tauri:android:dev"]);
+  expect(androidDev.direct, "script tauri:android:dev directly runs Tauri Android dev (host is optional)");
   expect(
-    pkg.scripts?.["tauri:android:dev"]?.includes("--host"),
-    "script tauri:android:dev exposes the dev server host to devices",
-  );
-  expect(
-    !pkg.scripts?.["tauri:android:dev"]?.includes("--host 0.0.0.0"),
-    "script tauri:android:dev does not publish 0.0.0.0 as the device host",
+    !androidDev.wildcardHost,
+    "script tauri:android:dev does not publish a wildcard address as the device host",
   );
   expect(
     !pkg.scripts?.dev?.includes("--host 0.0.0.0"),

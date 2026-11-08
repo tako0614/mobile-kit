@@ -367,6 +367,17 @@ To have the doctor verify the product-owned remote-push plugin wiring, add:
   --remote-push-plugin mobile-push
 ```
 
+The Android dev script may be `bunx tauri android dev`: Tauri's `--host`
+is optional. The doctor recognizes this direct command with an optional
+literal device name, `--open`/`-o`, `--force-ip-prompt`, and `--host` (with
+an optional literal address, also `--host=ADDRESS`). Other CLI options can
+be forwarded when invoking the package script. Shell wrappers, substitutions,
+comments and commands that merely mention `--host` are not accepted.
+Literal wildcard device addresses (`0.0.0.0`/`::`/`[::]`) are rejected;
+the doctor does not resolve DNS or validate network reachability. Vite's separate
+`TAURI_DEV_HOST` and host/HMR wiring and all native/release checks still apply;
+this static contract does not prove device selection or LAN reachability.
+
 The doctor then checks the product-owned plugin's capability, Rust
 registration, and native sources, and fails if the community
 `tauri-plugin-mobile-push` package is present instead. Passing those static
