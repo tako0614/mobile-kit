@@ -370,8 +370,10 @@ This static check supports `target_os` predicates for Android, iOS, Linux,
 macOS and Windows, `any(...)` lists of those predicates, and `not(...)` around
 one predicate or such a list. Other target expressions fail explicitly rather
 than being guessed. TOML comments, dependency tables and package aliases are
-parsed, but this check does not resolve Cargo workspaces/features or qualify
-native registration and execution.
+parsed using the installed Bun. Parser errors fail the check, but syntax
+acceptance depends on that Bun version; this is not a complete Cargo manifest
+validator. It does not resolve Cargo workspaces/features or qualify native
+registration and execution.
 
 To have the doctor verify the product-owned remote-push plugin wiring, add:
 

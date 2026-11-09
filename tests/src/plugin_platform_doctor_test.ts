@@ -66,7 +66,10 @@ test("unknown plugin target predicates fail instead of assuming desktop support"
 });
 
 test("malformed manifests and unknown OS strings cannot justify capability grants", () => {
-  expect(inspect("[dependencies")).toContain("FAIL invalid Cargo.toml for plugin capability coverage");
+  // Bun 1.3.14 accepts this unfinished header as an empty table. It still
+  // cannot justify a runtime permission; do not assume the newer parser's error.
+  expect(inspect("[dependencies")).toContain("FAIL desktop capability grants app-screen only because Cargo.toml depends on it");
+  expect(inspect("invalid = = =")).toContain("FAIL invalid Cargo.toml for plugin capability coverage");
   expect(inspect('[target.\'cfg(target_os = "and roid")\'.dependencies]\ntauri-plugin-app-screen = "1"'))
     .toContain("FAIL unsupported Cargo target predicate for plugin app-screen");
 });
