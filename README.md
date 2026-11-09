@@ -361,6 +361,20 @@ bun ../mobile-kit/scripts/check-tauri-mobile.mjs \
   --dev-port 1420
 ```
 
+Plugin capability coverage uses the runtime dependency tables in `Cargo.toml`.
+Declarations for the same plugin are combined before checking permissions, so a
+plugin declared separately for desktop and mobile is not mistaken for a
+mobile-only plugin. Build/dev dependencies do not justify runtime permissions;
+a truly mobile-only plugin is still rejected in the desktop capability.
+This static check supports `target_os` predicates for Android, iOS, Linux,
+macOS and Windows, `any(...)` lists of those predicates, and `not(...)` around
+one predicate or such a list. Other target expressions fail explicitly rather
+than being guessed. TOML comments, dependency tables and package aliases are
+parsed using the installed Bun. Parser errors fail the check, but syntax
+acceptance depends on that Bun version; this is not a complete Cargo manifest
+validator. It does not resolve Cargo workspaces/features or qualify native
+registration and execution.
+
 To have the doctor verify the product-owned remote-push plugin wiring, add:
 
 ```sh
