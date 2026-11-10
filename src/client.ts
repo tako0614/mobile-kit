@@ -11,6 +11,8 @@ import type {
   MobilePushNotification,
   MobilePushNotificationEventKind,
   MobilePushRegistration,
+  MobileRetiredAccountScope,
+  MobileRetiredScopeReason,
   MobileRoutePayload,
   MobileSession,
   MobileSessionUnlockOptions,
@@ -101,6 +103,13 @@ export interface MobileClientCopy {
   readonly sessionUnlockFailedStatus?: string;
   readonly unlockSessionLabel?: string;
   readonly signedOutStatus?: string;
+  /**
+   * Published when the product's
+   * {@link CreateMobileClientControllerOptions.onAccountScopeRetired} cleanup
+   * reports a failure after a real retirement. The scope is still retired;
+   * this reports the separate cleanup failure instead of faking a purge.
+   */
+  readonly accountCleanupFailedStatus?: string;
   readonly qrFallbackStatus?: string;
   readonly urlFallbackStatus?: string;
   readonly homeLoadingStatus?: string;
@@ -160,6 +169,20 @@ export interface CreateMobileClientControllerOptions<Home = unknown> {
   readonly homeLabel?: string;
   /** A product sign-in for the hosts it claims; see {@link MobileCustomSignIn}. */
   readonly customSignIn?: MobileCustomSignIn;
+  /**
+   * Called once per saved-account scope the controller actually removes —
+   * an explicit sign-out or an issuer-invalidated session — after the saved
+   * row is gone. Never fires for transient teardown: `stop`, a session kept
+   * after a transient refresh failure, home load errors, unlock retries, or
+   * process exit all leave the scope (and product-owned recoverable state
+   * keyed to it) alone. Runs detached: retirement never waits on product
+   * cleanup, a throwing callback never keeps the user signed in, and its
+   * failure is surfaced through the status stream
+   * ({@link MobileClientCopy.accountCleanupFailedStatus}).
+   */
+  readonly onAccountScopeRetired?: (
+    scope: MobileRetiredAccountScope,
+  ) => Promise<void> | void;
 }
 
 export interface MobileClientActionResult {
@@ -245,13 +268,15 @@ export function createMobileClientController<Home = unknown>(
     if (expectedEpoch !== sessionLifecycleEpoch) return;
     invalidateSessionLifecycle();
     await stopPushEventListeners();
-    const list = await enqueueSessionStorageOperation(async () =>
-      await removeMobileAccountSessionFor({
+    const { list, retired } = await enqueueSessionStorageOperation(async () => {
+      const before = await loadAccountList();
+      const after = await removeMobileAccountSessionFor({
         adapter: options.adapter,
         nativeBridge: options.nativeBridge,
         session: failed,
-      }),
-    );
+      });
+      return { list: after, retired: removedAccountRows(before, after) };
+    });
     publish({
       ...accountListState(list),
       session: undefined,
@@ -266,6 +291,7 @@ export function createMobileClientController<Home = unknown>(
       pushLoading: false,
       status: mobileErrorMessage(error, copy.signInFailedStatus),
     });
+    notifyAccountScopesRetired(retired, "session-invalidated");
   }
 
   async function freshenSession(
@@ -413,6 +439,39 @@ export function createMobileClientController<Home = unknown>(
       });
     } catch {
       return { accounts: state.accounts, activeId: state.activeAccountId };
+    }
+  }
+
+  /**
+   * Notifies the product once per scope whose saved row a retirement path
+   * actually removed. Detached on purpose: the row is already gone, so the
+   * sign-out must not wait on product cleanup; a cleanup failure is surfaced
+   * through the status stream rather than hidden or faked as a purge.
+   */
+  function notifyAccountScopesRetired(
+    retired: readonly MobileAccountSummary[],
+    reason: MobileRetiredScopeReason,
+  ) {
+    const notify = options.onAccountScopeRetired;
+    if (!notify) return;
+    for (const row of retired) {
+      const scope: MobileRetiredAccountScope = {
+        id: row.id,
+        hostUrl: row.hostUrl,
+        product: row.product,
+        ...(row.accountId ? { accountId: row.accountId } : {}),
+        reason,
+      };
+      void Promise.resolve()
+        .then(() => notify(scope))
+        .catch((error) => {
+          publish({
+            status: mobileErrorMessage(
+              error,
+              copy.accountCleanupFailedStatus,
+            ),
+          });
+        });
     }
   }
 
@@ -930,28 +989,32 @@ export function createMobileClientController<Home = unknown>(
         unregisterNativePushBestEffort(),
       ]);
     });
-    const list = await enqueueSessionStorageOperation(async () => {
+    const { list, retired } = await enqueueSessionStorageOperation(async () => {
+      const before = await loadAccountList();
       await deleteCredentialFromStores(
         options.nativeBridge,
         mobileAuthRequestStorageKey(options.adapter),
       );
+      let list: MobileAccountList;
       if (accountId) {
-        return await removeMobileAccountSession({
+        list = await removeMobileAccountSession({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           accountId,
         });
-      }
-      if (currentSession) {
-        return await removeMobileAccountSessionFor({
+      } else if (currentSession) {
+        list = await removeMobileAccountSessionFor({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           session: currentSession,
         });
+      } else {
+        list = before;
       }
-      return await loadAccountList();
+      return { list, retired: removedAccountRows(before, list) };
     });
     publish(accountListState(list));
+    notifyAccountScopesRetired(retired, "signed-out");
     await settleWithin(
       Promise.allSettled([listenerCleanup, pushCleanup, revocation]),
       signOutCleanupTimeoutMs,
@@ -1303,14 +1366,19 @@ export function createMobileClientController<Home = unknown>(
       } catch {
         session = undefined;
       }
-      const list = await enqueueSessionStorageOperation(async () =>
-        await removeMobileAccountSession({
-          adapter: options.adapter,
-          nativeBridge: options.nativeBridge,
-          accountId,
-        }),
+      const { list, retired } = await enqueueSessionStorageOperation(
+        async () => {
+          const before = await loadAccountList();
+          const after = await removeMobileAccountSession({
+            adapter: options.adapter,
+            nativeBridge: options.nativeBridge,
+            accountId,
+          });
+          return { list: after, retired: removedAccountRows(before, after) };
+        },
       );
       publish({ ...accountListState(list), status: copy.signedOutStatus });
+      notifyAccountScopesRetired(retired, "signed-out");
       if (session) {
         await settleWithin(
           revokeSessionBestEffort(session),
@@ -1436,6 +1504,15 @@ function accountListState(list: MobileAccountList): {
   return { accounts: list.accounts, activeAccountId: list.activeId };
 }
 
+/** Saved rows in `before` that `after` no longer lists — retired scopes. */
+function removedAccountRows(
+  before: MobileAccountList,
+  after: MobileAccountList,
+): MobileAccountSummary[] {
+  const kept = new Set(after.accounts.map((account) => account.id));
+  return before.accounts.filter((account) => !kept.has(account.id));
+}
+
 async function settleWithin(
   operation: Promise<unknown>,
   timeoutMs: number,
@@ -1538,6 +1615,9 @@ function createClientCopy(
       "セッションの解除をキャンセルしました。",
     unlockSessionLabel: options.copy?.unlockSessionLabel ?? "セッションを解除",
     signedOutStatus: options.copy?.signedOutStatus ?? "サインアウトしました。",
+    accountCleanupFailedStatus:
+      options.copy?.accountCleanupFailedStatus ??
+      "サインアウトしましたが、端末内データの整理に失敗しました。",
     qrFallbackStatus:
       options.copy?.qrFallbackStatus ??
       "QRコードの接続コードを貼り付けてください。",

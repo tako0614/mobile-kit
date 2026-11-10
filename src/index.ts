@@ -22,6 +22,8 @@ export type {
   MobilePushProvider,
   MobilePushRegistration,
   MobilePushRegistrationInput,
+  MobileRetiredAccountScope,
+  MobileRetiredScopeReason,
   MobileRoutePayload,
   MobileAuthRequest,
   MobileProductAdapter,

@@ -320,6 +320,29 @@ export interface MobileAccountList {
   readonly accounts: readonly MobileAccountSummary[];
 }
 
+/**
+ * Why a saved private scope ended: an explicit sign-out of the active or a
+ * saved account, or an issuer-invalidated session evicted after the
+ * authorization server rejected its refresh. Transient teardown — `stop`, a
+ * session kept after a transient refresh failure, home load errors, unlock
+ * retries, or process exit — never retires a scope.
+ */
+export type MobileRetiredScopeReason = "signed-out" | "session-invalidated";
+
+/**
+ * Non-secret identity of a removed saved-account scope, mirroring the
+ * {@link MobileAccountSummary} row that was deleted: `id` is the saved row
+ * id, `accountId` the canonical account subject when the session carried
+ * one. Carries no tokens, so a product may key per-scope private stores on it.
+ */
+export interface MobileRetiredAccountScope {
+  readonly id: string;
+  readonly hostUrl: string;
+  readonly product: MobileProductKind;
+  readonly accountId?: string;
+  readonly reason: MobileRetiredScopeReason;
+}
+
 export interface MobilePushRegistrationInput {
   readonly hostUrl: string;
   readonly product: MobileProductKind;

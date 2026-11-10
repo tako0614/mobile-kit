@@ -19,6 +19,7 @@ import type {
   MobileCustomSignIn,
   MobileKnownHost,
   MobileProductAdapter,
+  MobileRetiredAccountScope,
   MobileSession,
   MobileSessionUnlockOptions,
   NativeBridge,
@@ -136,6 +137,14 @@ export interface MobileClientShellProps<Home> {
   ) => JSX.Element;
   /** A product sign-in for the hosts it claims; see {@link MobileCustomSignIn}. */
   readonly customSignIn?: MobileCustomSignIn;
+  /**
+   * See {@link CreateMobileClientControllerOptions.onAccountScopeRetired}:
+   * fired once per saved-account scope actually removed, never for transient
+   * teardown; a cleanup failure is reported through the status stream.
+   */
+  readonly onAccountScopeRetired?: (
+    scope: MobileRetiredAccountScope,
+  ) => Promise<void> | void;
 }
 
 export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
@@ -164,6 +173,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
     sessionUnlock: props.sessionUnlock,
     homeLabel: props.homeLabel,
     customSignIn: props.customSignIn,
+    onAccountScopeRetired: props.onAccountScopeRetired,
   });
   const [state, setState] = createSignal<MobileClientState<Home>>(
     controller.getState(),
