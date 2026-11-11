@@ -97,6 +97,12 @@ export interface MobileClientCopy {
   readonly signInFailedStatus?: string;
   readonly sessionRestoredStatus?: string;
   readonly sessionLockedStatus?: string;
+  /**
+   * Published when the controller's {@link MobileClientController.start}
+   * rejects — a generic startup failure, never the raw storage or bridge
+   * exception text. The owning shell pairs it with an explicit retry.
+   */
+  readonly startupFailedStatus?: string;
   readonly sessionUnlockingStatus?: string;
   readonly sessionUnlockedStatus?: string;
   readonly sessionUnlockUnavailableStatus?: string;
@@ -381,6 +387,17 @@ export function createMobileClientController<Home = unknown>(
   function invalidateSessionLifecycle(): number {
     sessionLifecycleEpoch += 1;
     return sessionLifecycleEpoch;
+  }
+
+  // The launch-payload listener keeps custody until its removal callback
+  // actually returns: a throwing callback keeps its handle so a later
+  // start or stop can finish the removal it could not confirm, instead of
+  // dropping the handle and leaking the live registration.
+  function retireLaunchPayloadListener(): void {
+    const unlisten = launchPayloadUnlisten;
+    if (!unlisten) return;
+    unlisten();
+    launchPayloadUnlisten = undefined;
   }
 
   function enqueuePushOperation(operation: () => Promise<void>): Promise<void> {
@@ -1046,6 +1063,10 @@ export function createMobileClientController<Home = unknown>(
       started = true;
       const startEpoch = sessionLifecycleEpoch;
       try {
+        // An unconfirmed cleanup still owns its listener: finish or refuse
+        // it before registering another, so a retry never holds two live
+        // registrations.
+        retireLaunchPayloadListener();
         if (options.nativeBridge.onLaunchPayload) {
           launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
             (payload) => {
@@ -1078,15 +1099,32 @@ export function createMobileClientController<Home = unknown>(
         }
 
         if (startEpoch !== sessionLifecycleEpoch && !state.session) return;
+        // A retry that made it here recovered: drop the failure status so
+        // the settled screen stops showing the startup failure text.
+        if (state.status === copy.startupFailedStatus) {
+          publish({ status: copy.initialStatus });
+        }
         const payload = await options.nativeBridge.getLaunchPayload();
         if (payload) await controller.handleLaunchPayload(payload);
       } catch (error) {
         if (startEpoch === sessionLifecycleEpoch) {
+          publish({ status: copy.startupFailedStatus });
+          let cleanupError: unknown;
           try {
-            launchPayloadUnlisten?.();
-          } finally {
-            launchPayloadUnlisten = undefined;
-            started = false;
+            retireLaunchPayloadListener();
+          } catch (failure) {
+            cleanupError = failure;
+          }
+          started = false;
+          if (cleanupError !== undefined) {
+            // Both causes survive: the start error stays the cause of the
+            // thrown aggregate instead of being replaced by the cleanup
+            // failure that followed it.
+            throw new AggregateError(
+              [error, cleanupError],
+              mobileErrorMessage(error, copy.startupFailedStatus),
+              { cause: error },
+            );
           }
         }
         throw error;
@@ -1097,10 +1135,15 @@ export function createMobileClientController<Home = unknown>(
       connectionAbortController?.abort();
       connectionAbortController = undefined;
       invalidateSessionLifecycle();
-      launchPayloadUnlisten?.();
-      launchPayloadUnlisten = undefined;
-      void stopPushEventListeners();
-      started = false;
+      // Custody is kept on a removal the callback would not confirm: the
+      // failure propagates rather than reporting a stop that leaves a live
+      // listener behind.
+      try {
+        retireLaunchPayloadListener();
+      } finally {
+        void stopPushEventListeners();
+        started = false;
+      }
     },
     async handleLaunchPayload(payload) {
       if (isOidcCallbackPayload(payload)) {
@@ -1603,6 +1646,8 @@ function createClientCopy(
     sessionLockedStatus:
       options.copy?.sessionLockedStatus ??
       "保存されたセッションはロックされています。解除して続けてください。",
+    startupFailedStatus:
+      options.copy?.startupFailedStatus ?? "起動に失敗しました。",
     sessionUnlockingStatus:
       options.copy?.sessionUnlockingStatus ?? "セッションを解除しています…",
     sessionUnlockedStatus:

@@ -33,6 +33,7 @@ import {
 } from "./url.ts";
 import { mobileErrorMessage } from "./error.ts";
 import { copyMobileText } from "./shell.ts";
+import { createStartupRetry } from "./startup-retry.ts";
 import type {
   MobileShellHostAction,
   MobileShellHostActionContext,
@@ -91,6 +92,13 @@ export interface MobileShellCopy<Home> {
   readonly copyHostUrlLabel?: string;
   readonly copyHostUrlSuccessStatus?: string;
   readonly copyHostUrlFailedStatus?: string;
+  /**
+   * Generic startup failure shown when the controller's initial start
+   * rejects — never the raw storage or bridge exception text.
+   */
+  readonly startupFailedStatus?: string;
+  /** Label for the explicit startup retry next to startupFailedStatus. */
+  readonly startupRetryLabel?: string;
   readonly homeTitle: (home: Home | undefined) => string | undefined;
   readonly metricsLabel: string;
   readonly shortcutsLabel: string;
@@ -193,15 +201,27 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
   );
   let inputRef: HTMLInputElement | undefined;
   let unsubscribe: (() => void) | undefined;
+  // The initial start can reject (storage, bridge read) — keep the
+  // rejection off the unhandled-promise path, show a generic failure, and
+  // offer one explicit manual retry; the controller's own custody refuses
+  // before it could hold two live registrations.
+  const startupRetry = createStartupRetry(() => controller.start());
 
   onMount(() => {
     unsubscribe = controller.subscribe(setState);
-    void controller.start();
+    void startupRetry.attempt();
   });
 
   onCleanup(() => {
+    startupRetry.dispose();
     unsubscribe?.();
-    controller.stop();
+    try {
+      controller.stop();
+    } catch (error) {
+      // A stop that could not confirm its listener cleanup keeps custody
+      // inside the controller; surface it without rendering raw errors.
+      console.error("mobile client stop failed", error);
+    }
   });
 
   function openManualStep() {
@@ -351,6 +371,21 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       data-product={props.adapter.product}
       style={{ "--accent": props.adapter.accentColor }}
     >
+      <Show when={startupRetry.failed()}>
+        <section class="startup-failure" role="alert">
+          <p class="status">
+            {props.copy.startupFailedStatus ?? "起動に失敗しました。"}
+          </p>
+          <button
+            type="button"
+            class="primary"
+            disabled={startupRetry.starting()}
+            onClick={() => void startupRetry.attempt()}
+          >
+            {props.copy.startupRetryLabel ?? "再試行"}
+          </button>
+        </section>
+      </Show>
       <Show when={showSetup() && !state().discovery}>
         <section class="mobile-onboarding" data-step={setupMode()}>
           <Show when={state().addingAccount}>
@@ -513,7 +548,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                   {props.adapter.primaryActionLabel}
                 </button>
                 <p class="status" aria-live="polite">
-                  {state().status}
+                  {startupRetry.failed() ? "" : state().status}
                 </p>
               </form>
             </div>
@@ -712,7 +747,9 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                 {props.copy.unlockSessionLabel ?? "Unlock"}
               </button>
             </div>
-            <p class="status">{state().status}</p>
+            <p class="status">
+              {startupRetry.failed() ? "" : state().status}
+            </p>
             <Show when={state().accounts.length > 1}>
               <AccountRows
                 accounts={state().accounts}
@@ -777,7 +814,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
               </button>
             </div>
             <p class="status" aria-live="polite">
-              {state().status}
+              {startupRetry.failed() ? "" : state().status}
             </p>
           </section>
         )}
