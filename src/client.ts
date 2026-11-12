@@ -253,6 +253,10 @@ export function createMobileClientController<Home = unknown>(
   };
   let launchPayloadUnlisten: (() => void | Promise<void>) | undefined;
   let launchPayloadRemoval: Promise<void> | undefined;
+  // A native registration can outlive stop() before returning its removal
+  // handle. Serialize registration/retirement, including that late handle.
+  let launchPayloadRegistration: Promise<void> = Promise.resolve();
+  let startLifecycleEpoch = 0;
   let pushEventUnlisteners: Array<() => void | Promise<void>> = [];
   let sessionLifecycleEpoch = 0;
   let sessionStorageQueue: Promise<void> = Promise.resolve();
@@ -357,6 +361,7 @@ export function createMobileClientController<Home = unknown>(
     }
     const knownHosts = await rememberKnownHost(session);
     const accountList = accountListState(await loadAccountList());
+    if (epoch !== sessionLifecycleEpoch) return;
     publish({
       session,
       knownHosts,
@@ -1084,27 +1089,47 @@ export function createMobileClientController<Home = unknown>(
     async start() {
       if (started) return;
       started = true;
+      const startOwner = ++startLifecycleEpoch;
+      const ownsStart = () => started && startOwner === startLifecycleEpoch;
+      let acceptingPayloads = true;
       const startEpoch = sessionLifecycleEpoch;
       try {
         // An unconfirmed cleanup still owns its listener: finish or refuse
         // it before registering another, so a retry never holds two live
         // registrations.
-        await retireLaunchPayloadListener();
-        if (options.nativeBridge.onLaunchPayload) {
-          launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
-            (payload) => {
-              void controller.handleLaunchPayload(payload);
-            },
-          );
-        }
+        const registration = launchPayloadRegistration.then(async () => {
+          if (!ownsStart()) return;
+          await retireLaunchPayloadListener();
+          if (!ownsStart()) return;
+          if (options.nativeBridge.onLaunchPayload) {
+            launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
+              (payload) => {
+                if (ownsStart() && acceptingPayloads) {
+                  void controller.handleLaunchPayload(payload);
+                }
+              },
+            );
+            if (!ownsStart()) await retireLaunchPayloadListener();
+          }
+        });
+        // The owning start still observes the rejection. A later attempt
+        // gets its own chance to finish any retained cleanup, not that error.
+        launchPayloadRegistration = registration.catch(() => {});
+        await registration;
+        if (!ownsStart()) return;
 
-        publish({ knownHosts: await loadKnownHosts() });
+        const knownHosts = await loadKnownHosts();
+        if (!ownsStart()) return;
+        publish({ knownHosts });
 
         const existingSession = await loadMobileSession({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
         });
-        publish(accountListState(await loadAccountList()));
+        if (!ownsStart()) return;
+        const accountList = accountListState(await loadAccountList());
+        if (!ownsStart()) return;
+        publish(accountList);
         if (startEpoch !== sessionLifecycleEpoch) return;
         if (existingSession) {
           if (shouldLockRestoredSession(options, existingSession)) {
@@ -1121,6 +1146,7 @@ export function createMobileClientController<Home = unknown>(
           }
         }
 
+        if (!ownsStart()) return;
         if (startEpoch !== sessionLifecycleEpoch && !state.session) return;
         // A retry that made it here recovered: drop the failure status so
         // the settled screen stops showing the startup failure text.
@@ -1128,9 +1154,13 @@ export function createMobileClientController<Home = unknown>(
           publish({ status: copy.initialStatus });
         }
         const payload = await options.nativeBridge.getLaunchPayload();
+        if (!ownsStart()) return;
         if (payload) await controller.handleLaunchPayload(payload);
       } catch (error) {
-        if (startEpoch === sessionLifecycleEpoch) {
+        acceptingPayloads = false;
+        // Restoring a saved session changes the session epoch itself; it
+        // does not transfer ownership of this start or its failure cleanup.
+        if (ownsStart()) {
           publish({ status: copy.startupFailedStatus });
           let cleanupError: unknown;
           try {
@@ -1138,7 +1168,8 @@ export function createMobileClientController<Home = unknown>(
           } catch (failure) {
             cleanupError = failure;
           }
-          started = false;
+          // stop/restart may have happened while removal was settling.
+          if (ownsStart()) started = false;
           if (cleanupError !== undefined) {
             // Both causes survive: the start error stays the cause of the
             // thrown aggregate instead of being replaced by the cleanup
@@ -1154,6 +1185,7 @@ export function createMobileClientController<Home = unknown>(
       }
     },
     stop() {
+      startLifecycleEpoch += 1;
       connectionEpoch += 1;
       connectionAbortController?.abort();
       connectionAbortController = undefined;

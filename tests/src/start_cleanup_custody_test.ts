@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   createMobileClientController,
+  loadMobileSession,
   mobileAccountListStorageKey,
+  mobileKnownHostsStorageKey,
+  mobileSessionStorageKey,
   type MobileProductAdapter,
   type NativeBridge,
 } from "../../src/index.ts";
@@ -160,6 +163,322 @@ function makeController(bridge: NativeBridge) {
     homeLabel: "workspace",
   });
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+function seedSession(bridge: ReturnType<typeof custodyBridge>) {
+  bridge.secure.set(mobileSessionStorageKey(adapter), JSON.stringify({
+    hostUrl: "https://saved.example",
+    product: "takos",
+    accessToken: "synthetic-saved-session",
+    tokenType: "Bearer",
+    createdAt: "2026-11-12T00:00:00.000Z",
+  }));
+}
+
+test("manual Retry rereads launch input after a restored session's launch read failed", async () => {
+  const bridge = custodyBridge();
+  seedSession(bridge);
+  let reads = 0;
+  const launchError = new Error("synthetic launch read failure after restore");
+  const controller = makeController({
+    ...bridge,
+    getLaunchPayload: async () => {
+      reads += 1;
+      if (reads === 1) throw launchError;
+      return undefined;
+    },
+  });
+  const retry = createStartupRetry(() => controller.start());
+  await retry.attempt();
+  expect(controller.getState().session?.accessToken).toBe("synthetic-saved-session");
+  expect(retry.failed()).toBe(true);
+  await retry.attempt();
+  expect(reads).toBe(2);
+  expect(retry.failed()).toBe(false);
+  expect(bridge.counts).toMatchObject({ registered: 2, unlistenCalls: 1, live: 1 });
+  expect((await loadMobileSession({ adapter, nativeBridge: bridge }))?.accessToken)
+    .toBe("synthetic-saved-session");
+  controller.stop();
+});
+
+test("stop retires a native registration that returns its handle later without reading launch input", async () => {
+  const bridge = custodyBridge();
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  let reads = 0;
+  const controller = makeController({
+    ...bridge,
+    onLaunchPayload: async (handler) => {
+      const unlisten = await bridge.onLaunchPayload!(handler);
+      entered.resolve();
+      await release.promise;
+      return unlisten;
+    },
+    getLaunchPayload: async () => {
+      reads += 1;
+      return undefined;
+    },
+  });
+  const starting = controller.start();
+  await entered.promise;
+  controller.stop();
+  const stopped = controller.getState();
+  release.resolve();
+  await starting;
+  expect(bridge.counts).toMatchObject({ registered: 1, unlistenCalls: 1, live: 0 });
+  expect(reads).toBe(0);
+  expect(controller.getState()).toEqual(stopped);
+});
+
+test("restart waits for the previous pending registration and its retirement before registering", async () => {
+  const bridge = custodyBridge();
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  let peakLive = 0;
+  const controller = makeController({
+    ...bridge,
+    onLaunchPayload: async (handler) => {
+      const unlisten = await bridge.onLaunchPayload!(handler);
+      peakLive = Math.max(peakLive, bridge.counts.live);
+      if (bridge.counts.registered === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return unlisten;
+    },
+  });
+  const first = controller.start();
+  await entered.promise;
+  controller.stop();
+  const second = controller.start();
+  release.resolve();
+  await Promise.all([first, second]);
+  expect(peakLive).toBe(1);
+  expect(bridge.counts).toMatchObject({ registered: 2, unlistenCalls: 1, live: 1 });
+  // A stale completion must not clear the newer owner's started flag.
+  await controller.start();
+  expect(bridge.counts.registered).toBe(2);
+  controller.stop();
+  expect(bridge.counts.live).toBe(0);
+});
+
+test("a launch read returning after stop cannot process its old input", async () => {
+  const bridge = custodyBridge();
+  const entered = deferred<void>();
+  const release = deferred<string | undefined>();
+  const controller = makeController({
+    ...bridge,
+    getLaunchPayload: () => {
+      entered.resolve();
+      return release.promise;
+    },
+  });
+  const starting = controller.start();
+  await entered.promise;
+  controller.stop();
+  const stopped = controller.getState();
+  release.resolve("https://stale.example");
+  await starting;
+  expect(controller.getState()).toEqual(stopped);
+  expect(bridge.counts.live).toBe(0);
+});
+
+test("a stale launch read rejection cannot retire or reset a newer successful start", async () => {
+  const bridge = custodyBridge();
+  const entered = deferred<void>();
+  const release = deferred<string | undefined>();
+  let reads = 0;
+  const controller = makeController({
+    ...bridge,
+    getLaunchPayload: () => {
+      reads += 1;
+      if (reads !== 1) return Promise.resolve(undefined);
+      entered.resolve();
+      return release.promise;
+    },
+  });
+  const first = controller.start();
+  await entered.promise;
+  controller.stop();
+  await controller.start();
+  const restarted = controller.getState();
+  const failure = new Error("late launch read refusal");
+  release.reject(failure);
+  await expect(first).rejects.toBe(failure);
+  expect(controller.getState()).toEqual(restarted);
+  expect(bridge.counts).toMatchObject({ registered: 2, unlistenCalls: 1, live: 1 });
+  await controller.start();
+  expect(reads).toBe(2);
+  controller.stop();
+});
+
+test("a stopped listener stays inert through refused removal and a later restart", async () => {
+  const bridge = custodyBridge();
+  const callbacks: Array<(payload: string) => void> = [];
+  const controller = makeController({
+    ...bridge,
+    onLaunchPayload: async (handler) => {
+      callbacks.push(handler);
+      return bridge.onLaunchPayload!(handler);
+    },
+  });
+  await controller.start();
+  bridge.failUnlisten(1);
+  expect(() => controller.stop()).toThrow(cleanupError);
+  const stopped = controller.getState();
+  callbacks[0]!("https://stale.example");
+  expect(controller.getState()).toEqual(stopped);
+  await controller.start();
+  const restarted = controller.getState();
+  callbacks[0]!("https://still-stale.example");
+  expect(controller.getState()).toEqual(restarted);
+  // The current listener still dispatches; rejecting stale callbacks must
+  // not accidentally disable launch input for the replacement owner.
+  callbacks[1]!("https://current.example");
+  expect(controller.getState().connectInput).toBe("https://current.example");
+  controller.stop();
+});
+
+test("an older failed start's pending cleanup cannot reset a start requested after stop", async () => {
+  const bridge = custodyBridge();
+  const controller = makeController(bridge);
+  bridge.failReads(1);
+  bridge.deferUnlisten();
+  const first = controller.start().catch((error: unknown) => error);
+  while (bridge.counts.unlistenCalls === 0) await Promise.resolve();
+  controller.stop();
+  const second = controller.start();
+  await bridge.settleUnlisten();
+  expect(await first).toBe(readError);
+  await second;
+  await controller.start();
+  expect(bridge.counts).toMatchObject({ registered: 2, unlistenCalls: 1, live: 1 });
+  controller.stop();
+});
+
+test("stop during restored-session host persistence prevents a late session publish", async () => {
+  const bridge = custodyBridge();
+  seedSession(bridge);
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const controller = makeController({
+    ...bridge,
+    storage: {
+      ...bridge.storage!,
+      set: async (key, value) => {
+        if (key === mobileKnownHostsStorageKey(adapter)) {
+          entered.resolve();
+          await release.promise;
+        }
+        await bridge.storage!.set(key, value);
+      },
+    },
+  });
+  const starting = controller.start();
+  await entered.promise;
+  controller.stop();
+  const stopped = controller.getState();
+  release.resolve();
+  await starting;
+  expect(controller.getState()).toEqual(stopped);
+  expect(controller.getState().session).toBeUndefined();
+  expect(bridge.counts.live).toBe(0);
+});
+
+test("a stopped registration refusal does not reject or reset a queued newer start", async () => {
+  const bridge = custodyBridge();
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const failure = new Error("late registration refusal");
+  let registrations = 0;
+  const controller = makeController({
+    ...bridge,
+    onLaunchPayload: async (handler) => {
+      registrations += 1;
+      if (registrations === 1) {
+        entered.resolve();
+        await release.promise;
+        throw failure;
+      }
+      return bridge.onLaunchPayload!(handler);
+    },
+  });
+  const first = controller.start().catch((error: unknown) => error);
+  await entered.promise;
+  controller.stop();
+  const second = controller.start();
+  release.resolve();
+  expect(await first).toBe(failure);
+  await second;
+  await controller.start();
+  expect(registrations).toBe(2);
+  expect(bridge.counts).toMatchObject({ registered: 1, unlistenCalls: 0, live: 1 });
+  controller.stop();
+});
+
+test("a late handle's refused async removal stays in custody before a queued replacement", async () => {
+  const bridge = custodyBridge();
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  let peakLive = 0;
+  const controller = makeController({
+    ...bridge,
+    onLaunchPayload: async (handler) => {
+      const unlisten = await bridge.onLaunchPayload!(handler);
+      peakLive = Math.max(peakLive, bridge.counts.live);
+      if (bridge.counts.registered === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return unlisten;
+    },
+  });
+  const first = controller.start().catch((error: unknown) => error);
+  await entered.promise;
+  controller.stop();
+  const second = controller.start();
+  bridge.deferUnlisten();
+  release.resolve();
+  await bridge.settleUnlisten(cleanupError);
+  expect(await first).toBe(cleanupError);
+  await second;
+  expect(peakLive).toBe(1);
+  expect(bridge.counts).toMatchObject({ registered: 2, unlistenCalls: 2, live: 1 });
+  controller.stop();
+});
+
+test("a failed start's callback is inert while its async cleanup is still pending", async () => {
+  const bridge = custodyBridge();
+  let callback!: (payload: string) => void;
+  const controller = makeController({
+    ...bridge,
+    onLaunchPayload: async (handler) => {
+      callback = handler;
+      return bridge.onLaunchPayload!(handler);
+    },
+  });
+  bridge.failReads(1);
+  bridge.deferUnlisten();
+  const first = controller.start().catch((error: unknown) => error);
+  while (bridge.counts.unlistenCalls === 0) await Promise.resolve();
+  const failing = controller.getState();
+  callback("https://stale.example");
+  expect(controller.getState()).toEqual(failing);
+  await bridge.settleUnlisten();
+  expect(await first).toBe(readError);
+  await controller.start();
+  expect(bridge.counts).toMatchObject({ registered: 2, live: 1 });
+  controller.stop();
+});
 
 test("a single account-list read failure keeps the original rejection, saved data, and an operable manual retry", async () => {
   const bridge = custodyBridge();

@@ -117,6 +117,11 @@ UI.
 - Optionally gate restored mobile sessions behind biometric authentication when
   the native bridge reports biometric support. The session stays stored if the
   user cancels unlock, so the app can retry without forcing a new sign-in.
+- Keep startup ownership separate from session restoration. A launch-input read
+  failure after restoring a saved session leaves manual Retry operable without
+  deleting that session. Stop invalidates old startup callbacks/read results;
+  if a native registration returns its removal handle later, a newer start
+  waits for that registration and confirmed removal before acquiring its own.
 - Let product shells opt into remote push token registration by combining the
   native bridge's typed `registerPushNotifications` adapter with a
   product-owned host registration callback. Sign-in and session restore remain
