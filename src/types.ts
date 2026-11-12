@@ -401,7 +401,7 @@ export interface NativeBridge {
   readonly getLaunchPayload: () => Promise<string | undefined>;
   readonly onLaunchPayload?: (
     handler: (payload: string) => void,
-  ) => Promise<() => void>;
+  ) => Promise<() => void | Promise<void>>;
   readonly openExternalUrl: (url: string) => Promise<void>;
   readonly scanConnectionPayload?: () => Promise<string | undefined>;
   readonly requestLocalNotificationPermission?: () => Promise<boolean>;

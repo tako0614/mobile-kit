@@ -39,11 +39,16 @@ function custodyBridge() {
   const counts = { registered: 0, unlistenCalls: 0, live: 0, fetches: 0 };
   let readFailures = 0;
   let unlistenFailures = 0;
+  let asyncUnlisten = false;
+  let deferredRemoval: { settle: (error?: unknown) => void } | undefined;
   const bridge: NativeBridge & {
     readonly opened: string[];
     readonly counts: typeof counts;
     failReads: (count: number) => void;
     failUnlisten: (count: number) => void;
+    asyncUnlisten: (yes?: boolean) => void;
+    deferUnlisten: () => void;
+    settleUnlisten: (error?: unknown) => Promise<void>;
     plain: Map<string, string>;
     secure: Map<string, string>;
   } = {
@@ -54,6 +59,21 @@ function custodyBridge() {
     },
     failUnlisten: (count) => {
       unlistenFailures += count;
+    },
+    asyncUnlisten: (yes = true) => {
+      asyncUnlisten = yes;
+    },
+    deferUnlisten: () => {
+      deferredRemoval = {} as { settle: (error?: unknown) => void };
+    },
+    settleUnlisten: async (error?: unknown) => {
+      if (!deferredRemoval) throw new Error("no deferred unlisten is pending");
+      while (!deferredRemoval.settle) {
+        await Promise.resolve();
+      }
+      const pending = deferredRemoval;
+      deferredRemoval = undefined;
+      pending.settle(error);
     },
     plain,
     secure,
@@ -95,6 +115,28 @@ function custodyBridge() {
       counts.live += 1;
       return () => {
         counts.unlistenCalls += 1;
+        if (deferredRemoval) {
+          const removal = deferredRemoval;
+          return new Promise<void>((resolve, reject) => {
+            removal.settle = (error?: unknown) => {
+              if (error === undefined) {
+                counts.live -= 1;
+                resolve();
+              } else {
+                reject(error);
+              }
+            };
+          });
+        }
+        if (asyncUnlisten) {
+          return (async () => {
+            if (unlistenFailures > 0) {
+              unlistenFailures -= 1;
+              throw cleanupError;
+            }
+            counts.live -= 1;
+          })();
+        }
         if (unlistenFailures > 0) {
           unlistenFailures -= 1;
           throw cleanupError;
@@ -229,6 +271,89 @@ test("stop keeps custody of an unconfirmed cleanup instead of reporting retireme
   // A healthy stop still returns normally with nothing left live.
   controller.stop();
   expect(bridge.counts.live).toBe(0);
+});
+
+test("an async removal rejection keeps custody like a synchronous refusal", async () => {
+  // Tauri's listen() resolves to an async _unlisten: a removal failure
+  // arrives as a rejected promise, not a thrown error. The start catch's
+  // awaited retire surfaces it as the second cause exactly like a throw.
+  const bridge = custodyBridge();
+  bridge.asyncUnlisten(true);
+  const controller = makeController(bridge);
+  bridge.failReads(1);
+  bridge.failUnlisten(1);
+
+  const first = await controller.start().then(
+    () => {
+      throw new Error("start unexpectedly resolved");
+    },
+    (error: unknown) => error,
+  );
+  expect(first).toBeInstanceOf(AggregateError);
+  expect((first as AggregateError).errors).toEqual([readError, cleanupError]);
+  expect((first as AggregateError).cause).toBe(readError);
+  expect(bridge.counts).toMatchObject({ registered: 1, unlistenCalls: 1, live: 1 });
+
+  // The retained handle lets the next explicit start finish the removal
+  // before registering exactly one replacement.
+  bridge.asyncUnlisten(false);
+  await controller.start();
+  expect(bridge.counts).toMatchObject({ registered: 2, live: 1 });
+});
+
+test("a still-pending removal is awaited before a retry registers", async () => {
+  const bridge = custodyBridge();
+  const controller = makeController(bridge);
+  bridge.failReads(1);
+  bridge.deferUnlisten();
+
+  let rejected: unknown;
+  let settled = false;
+  const attempt = controller.start().then(
+    () => {
+      throw new Error("start unexpectedly resolved");
+    },
+    (error: unknown) => error,
+  ).finally(() => {
+    settled = true;
+  });
+  // The failed start cannot settle while its own cleanup is unconfirmed:
+  // once the deferred removal was invoked, the attempt must still be open.
+  while (bridge.counts.unlistenCalls === 0) {
+    await Promise.resolve();
+  }
+  expect(settled).toBe(false);
+  await bridge.settleUnlisten();
+  rejected = await attempt;
+  expect(rejected).toBe(readError);
+  expect(bridge.counts).toMatchObject({ registered: 1, unlistenCalls: 1, live: 0 });
+
+  await controller.start();
+  expect(bridge.counts).toMatchObject({ registered: 2, live: 1 });
+});
+
+test("stop cannot wait on an async removal but keeps its custody and surfaces a refusal", async () => {
+  const bridge = custodyBridge();
+  const controller = makeController(bridge);
+  await controller.start();
+  expect(bridge.counts).toMatchObject({ registered: 1, live: 1 });
+
+  // A pending removal: stop() initiates it and returns while the promise is
+  // still open — no false retirement, no swallowed rejection.
+  bridge.deferUnlisten();
+  controller.stop();
+  expect(bridge.counts).toMatchObject({ unlistenCalls: 1, live: 1 });
+
+  // Its refusal is drained to a diagnostic, and the retained handle lets the
+  // next explicit start finish the removal before registering once.
+  await bridge.settleUnlisten(cleanupError);
+  await Promise.resolve(); // let the drained rejection land
+  bridge.deferUnlisten();
+  const retry = controller.start();
+  await bridge.settleUnlisten();
+  await retry;
+  await Promise.resolve();
+  expect(bridge.counts).toMatchObject({ registered: 2, unlistenCalls: 2, live: 1 });
 });
 
 test("startup retry dedupes in-flight attempts, recovers on success, and honors disposal", async () => {

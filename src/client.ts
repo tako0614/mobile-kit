@@ -251,7 +251,8 @@ export function createMobileClientController<Home = unknown>(
     pushStatus: "",
     pushLoading: false,
   };
-  let launchPayloadUnlisten: (() => void) | undefined;
+  let launchPayloadUnlisten: (() => void | Promise<void>) | undefined;
+  let launchPayloadRemoval: Promise<void> | undefined;
   let pushEventUnlisteners: Array<() => void | Promise<void>> = [];
   let sessionLifecycleEpoch = 0;
   let sessionStorageQueue: Promise<void> = Promise.resolve();
@@ -393,10 +394,32 @@ export function createMobileClientController<Home = unknown>(
   // actually returns: a throwing callback keeps its handle so a later
   // start or stop can finish the removal it could not confirm, instead of
   // dropping the handle and leaking the live registration.
-  function retireLaunchPayloadListener(): void {
+  // A bridge may also declare the removal asynchronous (Tauri's listen()
+  // resolves to async _unlisten: the JS handler detaches synchronously and
+  // the native event|unlisten invoke follows): the returned promise settles
+  // the confirmation, and a rejection keeps custody exactly like a throw.
+  function retireLaunchPayloadListener(): void | Promise<void> {
+    // A removal already in flight is the same custody: wait on it instead
+    // of re-invoking the callback, so no adapter's detach can race a second
+    // unlisten call.
+    if (launchPayloadRemoval) return launchPayloadRemoval;
     const unlisten = launchPayloadUnlisten;
     if (!unlisten) return;
-    unlisten();
+    const pending = unlisten();
+    if (pending && typeof pending.then === "function") {
+      launchPayloadRemoval = Promise.resolve(pending)
+        .then(() => {
+          // Clear only when the removal itself resolved, and only if no
+          // newer registration already replaced this handle.
+          if (launchPayloadUnlisten === unlisten) {
+            launchPayloadUnlisten = undefined;
+          }
+        })
+        .finally(() => {
+          launchPayloadRemoval = undefined;
+        });
+      return launchPayloadRemoval;
+    }
     launchPayloadUnlisten = undefined;
   }
 
@@ -1066,7 +1089,7 @@ export function createMobileClientController<Home = unknown>(
         // An unconfirmed cleanup still owns its listener: finish or refuse
         // it before registering another, so a retry never holds two live
         // registrations.
-        retireLaunchPayloadListener();
+        await retireLaunchPayloadListener();
         if (options.nativeBridge.onLaunchPayload) {
           launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
             (payload) => {
@@ -1111,7 +1134,7 @@ export function createMobileClientController<Home = unknown>(
           publish({ status: copy.startupFailedStatus });
           let cleanupError: unknown;
           try {
-            retireLaunchPayloadListener();
+            await retireLaunchPayloadListener();
           } catch (failure) {
             cleanupError = failure;
           }
@@ -1139,7 +1162,18 @@ export function createMobileClientController<Home = unknown>(
       // failure propagates rather than reporting a stop that leaves a live
       // listener behind.
       try {
-        retireLaunchPayloadListener();
+        const pending = retireLaunchPayloadListener();
+        if (pending) {
+          // stop() cannot wait: a still-pending removal keeps its custody
+          // and surfaces any refusal as a diagnostic, never a swallowed
+          // rejection. The retained handle lets a later start/stop finish it.
+          void pending.catch((error: unknown) => {
+            console.error(
+              "mobile client launch-payload listener removal failed",
+              error,
+            );
+          });
+        }
       } finally {
         void stopPushEventListeners();
         started = false;

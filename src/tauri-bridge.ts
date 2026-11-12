@@ -19,7 +19,7 @@ export interface TauriDeepLinkAdapter {
   readonly getCurrent: () => Promise<string[] | null>;
   readonly onOpenUrl: (
     handler: (urls: string[]) => void,
-  ) => Promise<() => void>;
+  ) => Promise<() => void | Promise<void>>;
 }
 
 export interface TauriOpenerAdapter {
