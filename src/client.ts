@@ -5,11 +5,14 @@ import type {
   MobileAccountSummary,
   MobileBiometricPrompt,
   MobileConnectPayload,
+  MobileCustomSignIn,
   MobileProductAdapter,
   MobileKnownHost,
   MobilePushNotification,
   MobilePushNotificationEventKind,
   MobilePushRegistration,
+  MobileRetiredAccountScope,
+  MobileRetiredScopeReason,
   MobileRoutePayload,
   MobileSession,
   MobileSessionUnlockOptions,
@@ -20,7 +23,6 @@ import {
   completeMobileOidcSignIn,
   ensureFreshMobileSession,
   isOidcCallbackPayload,
-  loadMobileSession,
   MobileSessionRefreshError,
   mobileAuthRequestStorageKey,
   revokeMobileHostSession,
@@ -29,7 +31,7 @@ import {
 } from "./auth.ts";
 import {
   loadMobileAccounts,
-  loadMobileAccountSession,
+  readMobileAccountSessionWithRetirement,
   removeMobileAccountSession,
   removeMobileAccountSessionFor,
   saveMobileAccountSession,
@@ -94,12 +96,25 @@ export interface MobileClientCopy {
   readonly signInFailedStatus?: string;
   readonly sessionRestoredStatus?: string;
   readonly sessionLockedStatus?: string;
+  /**
+   * Published when the controller's {@link MobileClientController.start}
+   * rejects — a generic startup failure, never the raw storage or bridge
+   * exception text. The owning shell pairs it with an explicit retry.
+   */
+  readonly startupFailedStatus?: string;
   readonly sessionUnlockingStatus?: string;
   readonly sessionUnlockedStatus?: string;
   readonly sessionUnlockUnavailableStatus?: string;
   readonly sessionUnlockFailedStatus?: string;
   readonly unlockSessionLabel?: string;
   readonly signedOutStatus?: string;
+  /**
+   * Published when the product's
+   * {@link CreateMobileClientControllerOptions.onAccountScopeRetired} cleanup
+   * reports a failure after a real retirement. The scope is still retired;
+   * this reports the separate cleanup failure instead of faking a purge.
+   */
+  readonly accountCleanupFailedStatus?: string;
   readonly qrFallbackStatus?: string;
   readonly urlFallbackStatus?: string;
   readonly homeLoadingStatus?: string;
@@ -157,6 +172,22 @@ export interface CreateMobileClientControllerOptions<Home = unknown> {
   readonly sessionUnlock?: MobileSessionUnlockOptions;
   readonly copy?: MobileClientCopy;
   readonly homeLabel?: string;
+  /** A product sign-in for the hosts it claims; see {@link MobileCustomSignIn}. */
+  readonly customSignIn?: MobileCustomSignIn;
+  /**
+   * Called once per saved-account scope the controller actually removes —
+   * an explicit sign-out or a discarded invalid session — after the saved
+   * row is gone. Never fires for transient teardown: `stop`, a session kept
+   * after a transient refresh failure, home load errors, unlock retries, or
+   * process exit all leave the scope (and product-owned recoverable state
+   * keyed to it) alone. Runs detached: retirement never waits on product
+   * cleanup, a throwing callback never keeps the user signed in, and its
+   * failure is surfaced through the status stream
+   * ({@link MobileClientCopy.accountCleanupFailedStatus}).
+   */
+  readonly onAccountScopeRetired?: (
+    scope: MobileRetiredAccountScope,
+  ) => Promise<void> | void;
 }
 
 export interface MobileClientActionResult {
@@ -219,7 +250,12 @@ export function createMobileClientController<Home = unknown>(
     pushStatus: "",
     pushLoading: false,
   };
-  let launchPayloadUnlisten: (() => void) | undefined;
+  let launchPayloadUnlisten: (() => void | Promise<void>) | undefined;
+  let launchPayloadRemoval: Promise<void> | undefined;
+  // A native registration can outlive stop() before returning its removal
+  // handle. Serialize registration/retirement, including that late handle.
+  let launchPayloadRegistration: Promise<void> = Promise.resolve();
+  let startLifecycleEpoch = 0;
   let pushEventUnlisteners: Array<() => void | Promise<void>> = [];
   let sessionLifecycleEpoch = 0;
   let sessionStorageQueue: Promise<void> = Promise.resolve();
@@ -242,13 +278,15 @@ export function createMobileClientController<Home = unknown>(
     if (expectedEpoch !== sessionLifecycleEpoch) return;
     invalidateSessionLifecycle();
     await stopPushEventListeners();
-    const list = await enqueueSessionStorageOperation(async () =>
-      await removeMobileAccountSessionFor({
+    const { list, retired } = await enqueueSessionStorageOperation(async () => {
+      const before = await loadAccountList();
+      const after = await removeMobileAccountSessionFor({
         adapter: options.adapter,
         nativeBridge: options.nativeBridge,
         session: failed,
-      }),
-    );
+      });
+      return { list: after, retired: removedAccountRows(before, after) };
+    });
     publish({
       ...accountListState(list),
       session: undefined,
@@ -263,6 +301,7 @@ export function createMobileClientController<Home = unknown>(
       pushLoading: false,
       status: mobileErrorMessage(error, copy.signInFailedStatus),
     });
+    notifyAccountScopesRetired(retired, "session-invalidated");
   }
 
   async function freshenSession(
@@ -321,6 +360,7 @@ export function createMobileClientController<Home = unknown>(
     }
     const knownHosts = await rememberKnownHost(session);
     const accountList = accountListState(await loadAccountList());
+    if (epoch !== sessionLifecycleEpoch) return;
     publish({
       session,
       knownHosts,
@@ -352,6 +392,39 @@ export function createMobileClientController<Home = unknown>(
   function invalidateSessionLifecycle(): number {
     sessionLifecycleEpoch += 1;
     return sessionLifecycleEpoch;
+  }
+
+  // The launch-payload listener keeps custody until its removal callback
+  // actually returns: a throwing callback keeps its handle so a later
+  // start or stop can finish the removal it could not confirm, instead of
+  // dropping the handle and leaking the live registration.
+  // A bridge may also declare the removal asynchronous (Tauri's listen()
+  // resolves to async _unlisten: the JS handler detaches synchronously and
+  // the native event|unlisten invoke follows): the returned promise settles
+  // the confirmation, and a rejection keeps custody exactly like a throw.
+  function retireLaunchPayloadListener(): void | Promise<void> {
+    // A removal already in flight is the same custody: wait on it instead
+    // of re-invoking the callback, so no adapter's detach can race a second
+    // unlisten call.
+    if (launchPayloadRemoval) return launchPayloadRemoval;
+    const unlisten = launchPayloadUnlisten;
+    if (!unlisten) return;
+    const pending = unlisten();
+    if (pending && typeof pending.then === "function") {
+      launchPayloadRemoval = Promise.resolve(pending)
+        .then(() => {
+          // Clear only when the removal itself resolved, and only if no
+          // newer registration already replaced this handle.
+          if (launchPayloadUnlisten === unlisten) {
+            launchPayloadUnlisten = undefined;
+          }
+        })
+        .finally(() => {
+          launchPayloadRemoval = undefined;
+        });
+      return launchPayloadRemoval;
+    }
+    launchPayloadUnlisten = undefined;
   }
 
   function enqueuePushOperation(operation: () => Promise<void>): Promise<void> {
@@ -413,7 +486,52 @@ export function createMobileClientController<Home = unknown>(
     }
   }
 
+  /**
+   * Notifies the product once per scope whose saved row a retirement path
+   * actually removed. Detached on purpose: the row is already gone, so the
+   * sign-out must not wait on product cleanup; a cleanup failure is surfaced
+   * through the status stream rather than hidden or faked as a purge.
+   */
+  function notifyAccountScopesRetired(
+    retired: readonly MobileAccountSummary[],
+    reason: MobileRetiredScopeReason,
+  ) {
+    const notify = options.onAccountScopeRetired;
+    if (!notify) return;
+    for (const row of retired) {
+      const scope: MobileRetiredAccountScope = {
+        id: row.id,
+        hostUrl: row.hostUrl,
+        product: row.product,
+        ...(row.accountId ? { accountId: row.accountId } : {}),
+        reason,
+      };
+      void Promise.resolve()
+        .then(() => notify(scope))
+        .catch((error) => {
+          publish({
+            status: mobileErrorMessage(
+              error,
+              copy.accountCleanupFailedStatus,
+            ),
+          });
+        });
+    }
+  }
+
   async function revokeSessionBestEffort(session: MobileSession) {
+    const customRevoke = options.customSignIn?.revokeSession;
+    if (customRevoke) {
+      let handled: boolean;
+      try {
+        handled = await customRevoke({ session, fetch: options.fetch });
+      } catch {
+        // Best effort, and never a reason to send the hook's credential to
+        // the standard issuer or host revocation instead.
+        handled = true;
+      }
+      if (handled) return;
+    }
     await Promise.allSettled([
       revokeMobileHostSession({ session, fetch: options.fetch }),
       revokeMobileOidcSession({ session, fetch: options.fetch }),
@@ -915,28 +1033,32 @@ export function createMobileClientController<Home = unknown>(
         unregisterNativePushBestEffort(),
       ]);
     });
-    const list = await enqueueSessionStorageOperation(async () => {
+    const { list, retired } = await enqueueSessionStorageOperation(async () => {
+      const before = await loadAccountList();
       await deleteCredentialFromStores(
         options.nativeBridge,
         mobileAuthRequestStorageKey(options.adapter),
       );
+      let list: MobileAccountList;
       if (accountId) {
-        return await removeMobileAccountSession({
+        list = await removeMobileAccountSession({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           accountId,
         });
-      }
-      if (currentSession) {
-        return await removeMobileAccountSessionFor({
+      } else if (currentSession) {
+        list = await removeMobileAccountSessionFor({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           session: currentSession,
         });
+      } else {
+        list = before;
       }
-      return await loadAccountList();
+      return { list, retired: removedAccountRows(before, list) };
     });
     publish(accountListState(list));
+    notifyAccountScopesRetired(retired, "signed-out");
     await settleWithin(
       Promise.allSettled([listenerCleanup, pushCleanup, revocation]),
       signOutCleanupTimeoutMs,
@@ -966,23 +1088,50 @@ export function createMobileClientController<Home = unknown>(
     async start() {
       if (started) return;
       started = true;
+      const startOwner = ++startLifecycleEpoch;
+      const ownsStart = () => started && startOwner === startLifecycleEpoch;
+      let acceptingPayloads = true;
       const startEpoch = sessionLifecycleEpoch;
       try {
-        if (options.nativeBridge.onLaunchPayload) {
-          launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
-            (payload) => {
-              void controller.handleLaunchPayload(payload);
-            },
-          );
-        }
+        // An unconfirmed cleanup still owns its listener: finish or refuse
+        // it before registering another, so a retry never holds two live
+        // registrations.
+        const registration = launchPayloadRegistration.then(async () => {
+          if (!ownsStart()) return;
+          await retireLaunchPayloadListener();
+          if (!ownsStart()) return;
+          if (options.nativeBridge.onLaunchPayload) {
+            launchPayloadUnlisten = await options.nativeBridge.onLaunchPayload(
+              (payload) => {
+                if (ownsStart() && acceptingPayloads) {
+                  void controller.handleLaunchPayload(payload);
+                }
+              },
+            );
+            if (!ownsStart()) await retireLaunchPayloadListener();
+          }
+        });
+        // The owning start still observes the rejection. A later attempt
+        // gets its own chance to finish any retained cleanup, not that error.
+        launchPayloadRegistration = registration.catch(() => {});
+        await registration;
+        if (!ownsStart()) return;
 
-        publish({ knownHosts: await loadKnownHosts() });
+        const knownHosts = await loadKnownHosts();
+        if (!ownsStart()) return;
+        publish({ knownHosts });
 
-        const existingSession = await loadMobileSession({
+        const restored = await readMobileAccountSessionWithRetirement({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
         });
-        publish(accountListState(await loadAccountList()));
+        if (restored.retired) notifyAccountScopesRetired([restored.retired], "session-invalidated");
+        if (restored.failure) throw restored.failure.error;
+        const existingSession = restored.session;
+        if (!ownsStart()) return;
+        const accountList = accountListState(await loadAccountList());
+        if (!ownsStart()) return;
+        publish(accountList);
         if (startEpoch !== sessionLifecycleEpoch) return;
         if (existingSession) {
           if (shouldLockRestoredSession(options, existingSession)) {
@@ -999,30 +1148,70 @@ export function createMobileClientController<Home = unknown>(
           }
         }
 
+        if (!ownsStart()) return;
         if (startEpoch !== sessionLifecycleEpoch && !state.session) return;
+        // A retry that made it here recovered: drop the failure status so
+        // the settled screen stops showing the startup failure text.
+        if (state.status === copy.startupFailedStatus) {
+          publish({ status: copy.initialStatus });
+        }
         const payload = await options.nativeBridge.getLaunchPayload();
+        if (!ownsStart()) return;
         if (payload) await controller.handleLaunchPayload(payload);
       } catch (error) {
-        if (startEpoch === sessionLifecycleEpoch) {
+        acceptingPayloads = false;
+        // Restoring a saved session changes the session epoch itself; it
+        // does not transfer ownership of this start or its failure cleanup.
+        if (ownsStart()) {
+          publish({ status: copy.startupFailedStatus });
+          let cleanupError: unknown;
           try {
-            launchPayloadUnlisten?.();
-          } finally {
-            launchPayloadUnlisten = undefined;
-            started = false;
+            await retireLaunchPayloadListener();
+          } catch (failure) {
+            cleanupError = failure;
+          }
+          // stop/restart may have happened while removal was settling.
+          if (ownsStart()) started = false;
+          if (cleanupError !== undefined) {
+            // Both causes survive: the start error stays the cause of the
+            // thrown aggregate instead of being replaced by the cleanup
+            // failure that followed it.
+            throw new AggregateError(
+              [error, cleanupError],
+              mobileErrorMessage(error, copy.startupFailedStatus),
+              { cause: error },
+            );
           }
         }
         throw error;
       }
     },
     stop() {
+      startLifecycleEpoch += 1;
       connectionEpoch += 1;
       connectionAbortController?.abort();
       connectionAbortController = undefined;
       invalidateSessionLifecycle();
-      launchPayloadUnlisten?.();
-      launchPayloadUnlisten = undefined;
-      void stopPushEventListeners();
-      started = false;
+      // Custody is kept on a removal the callback would not confirm: the
+      // failure propagates rather than reporting a stop that leaves a live
+      // listener behind.
+      try {
+        const pending = retireLaunchPayloadListener();
+        if (pending) {
+          // stop() cannot wait: a still-pending removal keeps its custody
+          // and surfaces any refusal as a diagnostic, never a swallowed
+          // rejection. The retained handle lets a later start/stop finish it.
+          void pending.catch((error: unknown) => {
+            console.error(
+              "mobile client launch-payload listener removal failed",
+              error,
+            );
+          });
+        }
+      } finally {
+        void stopPushEventListeners();
+        started = false;
+      }
     },
     async handleLaunchPayload(payload) {
       if (isOidcCallbackPayload(payload)) {
@@ -1082,15 +1271,24 @@ export function createMobileClientController<Home = unknown>(
       }
       publish({ status: copy.preparingSignInStatus });
       try {
-        const result = await beginMobileOidcSignIn({
-          adapter: options.adapter,
-          discovery: current,
-          nativeBridge: options.nativeBridge,
-          scope: normalizeOidcScopes(
-            options.oidcScopes ?? options.adapter.oidcScopes,
-          ),
-          fetch: options.fetch,
-        });
+        const custom = options.customSignIn?.handles(current)
+          ? options.customSignIn
+          : undefined;
+        const result = custom
+          ? await custom.begin({
+              discovery: current,
+              nativeBridge: options.nativeBridge,
+              fetch: options.fetch,
+            })
+          : await beginMobileOidcSignIn({
+              adapter: options.adapter,
+              discovery: current,
+              nativeBridge: options.nativeBridge,
+              scope: normalizeOidcScopes(
+                options.oidcScopes ?? options.adapter.oidcScopes,
+              ),
+              fetch: options.fetch,
+            });
         publish({ status: copy.openingSignInStatus });
         await options.nativeBridge.openExternalUrl(result.authorizationUrl);
       } catch (error) {
@@ -1131,13 +1329,25 @@ export function createMobileClientController<Home = unknown>(
       const completionEpoch = sessionLifecycleEpoch;
       publish({ status: "Completing sign-in..." });
       try {
-        const session = await completeMobileOidcSignIn({
-          adapter: options.adapter,
-          nativeBridge: options.nativeBridge,
-          callbackUrl,
-          persistSession: false,
-          fetch: options.fetch,
-        });
+        const custom = options.customSignIn
+          ? await options.customSignIn.complete({
+              callbackUrl,
+              nativeBridge: options.nativeBridge,
+              fetch: options.fetch,
+            })
+          : undefined;
+        if (custom && custom.product !== options.adapter.product) {
+          throw new Error("Mobile session product does not match this app.");
+        }
+        const session =
+          custom ??
+          (await completeMobileOidcSignIn({
+            adapter: options.adapter,
+            nativeBridge: options.nativeBridge,
+            callbackUrl,
+            persistSession: false,
+            fetch: options.fetch,
+          }));
         if (!(await commitSignedInSession(session, completionEpoch))) return;
         await activateSession(session, copy.signedInStatus, completionEpoch);
       } catch (error) {
@@ -1258,23 +1468,38 @@ export function createMobileClientController<Home = unknown>(
       // Another saved account: revoke and forget it without touching the
       // active session.
       let session: MobileSession | undefined;
+      const notifiedWhileLoading: MobileAccountSummary[] = [];
       try {
-        session = await loadMobileAccountSession({
+        const loaded = await readMobileAccountSessionWithRetirement({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           accountId,
         });
+        if (loaded.retired) {
+          // This removal is already committed. A later storage refusal must
+          // not discard its fact or make us report the same row twice.
+          notifiedWhileLoading.push(loaded.retired);
+          notifyAccountScopesRetired([loaded.retired], "signed-out");
+        }
+        if (loaded.failure) throw loaded.failure.error;
+        session = loaded.session;
       } catch {
         session = undefined;
       }
-      const list = await enqueueSessionStorageOperation(async () =>
-        await removeMobileAccountSession({
-          adapter: options.adapter,
-          nativeBridge: options.nativeBridge,
-          accountId,
-        }),
+      const { list, retired } = await enqueueSessionStorageOperation(
+        async () => {
+          const before = await loadAccountList();
+          const after = await removeMobileAccountSession({
+            adapter: options.adapter,
+            nativeBridge: options.nativeBridge,
+            accountId,
+          });
+          return { list: after, retired: removedAccountRows(before, after)
+            .filter((row) => !notifiedWhileLoading.some((retired) => retired.id === row.id)) };
+        },
       );
       publish({ ...accountListState(list), status: copy.signedOutStatus });
+      notifyAccountScopesRetired(retired, "signed-out");
       if (session) {
         await settleWithin(
           revokeSessionBestEffort(session),
@@ -1290,11 +1515,14 @@ export function createMobileClientController<Home = unknown>(
       const switchEpoch = sessionLifecycleEpoch;
       let target: MobileSession | undefined;
       try {
-        target = await loadMobileAccountSession({
+        const loaded = await readMobileAccountSessionWithRetirement({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           accountId,
         });
+        if (loaded.retired) notifyAccountScopesRetired([loaded.retired], "session-invalidated");
+        if (loaded.failure) throw loaded.failure.error;
+        target = loaded.session;
       } catch (error) {
         publish({
           ...accountListState(await loadAccountList()),
@@ -1400,6 +1628,15 @@ function accountListState(list: MobileAccountList): {
   return { accounts: list.accounts, activeAccountId: list.activeId };
 }
 
+/** Saved rows in `before` that `after` no longer lists — retired scopes. */
+function removedAccountRows(
+  before: MobileAccountList,
+  after: MobileAccountList,
+): MobileAccountSummary[] {
+  const kept = new Set(after.accounts.map((account) => account.id));
+  return before.accounts.filter((account) => !kept.has(account.id));
+}
+
 async function settleWithin(
   operation: Promise<unknown>,
   timeoutMs: number,
@@ -1490,6 +1727,8 @@ function createClientCopy(
     sessionLockedStatus:
       options.copy?.sessionLockedStatus ??
       "保存されたセッションはロックされています。解除して続けてください。",
+    startupFailedStatus:
+      options.copy?.startupFailedStatus ?? "起動に失敗しました。",
     sessionUnlockingStatus:
       options.copy?.sessionUnlockingStatus ?? "セッションを解除しています…",
     sessionUnlockedStatus:
@@ -1502,6 +1741,9 @@ function createClientCopy(
       "セッションの解除をキャンセルしました。",
     unlockSessionLabel: options.copy?.unlockSessionLabel ?? "セッションを解除",
     signedOutStatus: options.copy?.signedOutStatus ?? "サインアウトしました。",
+    accountCleanupFailedStatus:
+      options.copy?.accountCleanupFailedStatus ??
+      "サインアウトしましたが、端末内データの整理に失敗しました。",
     qrFallbackStatus:
       options.copy?.qrFallbackStatus ??
       "QRコードの接続コードを貼り付けてください。",

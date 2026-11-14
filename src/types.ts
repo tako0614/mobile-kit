@@ -240,6 +240,43 @@ export interface MobileAuthRequest {
   readonly createdAt: string;
 }
 
+/**
+ * A sign-in a product shell runs instead of mobile-kit's own OIDC flow, for
+ * the hosts it claims; for example a host that redeems the authorization code
+ * itself and returns its own session. mobile-kit still opens the returned URL,
+ * routes the callback deep link, saves and activates the session, and signs it
+ * out; the hook owns the protocol.
+ */
+export interface MobileCustomSignIn {
+  /** Whether this discovered host signs in through the hook. */
+  readonly handles: (discovery: HostDiscovery) => boolean;
+  /** Prepares the sign-in and returns the URL to open in the browser. */
+  readonly begin: (input: {
+    readonly discovery: HostDiscovery;
+    readonly nativeBridge: NativeBridge;
+    readonly fetch?: FetchLike;
+  }) => Promise<{ readonly authorizationUrl: string }>;
+  /**
+   * Completes a callback. Returns undefined when the callback does not belong
+   * to a sign-in this hook began; mobile-kit's own flow then completes it.
+   */
+  readonly complete: (input: {
+    readonly callbackUrl: string;
+    readonly nativeBridge: NativeBridge;
+    readonly fetch?: FetchLike;
+  }) => Promise<MobileSession | undefined>;
+  /**
+   * Signs out a saved session this hook created. Returns false for a session
+   * that is not its own, which mobile-kit then revokes the standard way. A
+   * session the hook claims (or that throws here) is never sent to
+   * mobile-kit's issuer or host revocation.
+   */
+  readonly revokeSession?: (input: {
+    readonly session: MobileSession;
+    readonly fetch?: FetchLike;
+  }) => Promise<boolean>;
+}
+
 export interface MobileSession {
   readonly hostUrl: string;
   readonly product: MobileProductKind;
@@ -281,6 +318,30 @@ export interface MobileAccountList {
   readonly activeId?: string;
   /** Most recently used first. */
   readonly accounts: readonly MobileAccountSummary[];
+}
+
+/**
+ * Why a saved private scope ended: an explicit sign-out of the active or a
+ * saved account, or an invalidated session: its credential slot was missing,
+ * malformed or mismatched, or the authorization server rejected its refresh.
+ * Transient teardown — `stop`, a
+ * session kept after a transient refresh failure, home load errors, unlock
+ * retries, or process exit — never retires a scope.
+ */
+export type MobileRetiredScopeReason = "signed-out" | "session-invalidated";
+
+/**
+ * Non-secret identity of a removed saved-account scope, mirroring the
+ * {@link MobileAccountSummary} row that was deleted: `id` is the saved row
+ * id, `accountId` the canonical account subject when the session carried
+ * one. Carries no tokens, so a product may key per-scope private stores on it.
+ */
+export interface MobileRetiredAccountScope {
+  readonly id: string;
+  readonly hostUrl: string;
+  readonly product: MobileProductKind;
+  readonly accountId?: string;
+  readonly reason: MobileRetiredScopeReason;
 }
 
 export interface MobilePushRegistrationInput {
@@ -341,7 +402,7 @@ export interface NativeBridge {
   readonly getLaunchPayload: () => Promise<string | undefined>;
   readonly onLaunchPayload?: (
     handler: (payload: string) => void,
-  ) => Promise<() => void>;
+  ) => Promise<() => void | Promise<void>>;
   readonly openExternalUrl: (url: string) => Promise<void>;
   readonly scanConnectionPayload?: () => Promise<string | undefined>;
   readonly requestLocalNotificationPermission?: () => Promise<boolean>;

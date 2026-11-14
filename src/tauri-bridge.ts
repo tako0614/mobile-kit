@@ -19,7 +19,7 @@ export interface TauriDeepLinkAdapter {
   readonly getCurrent: () => Promise<string[] | null>;
   readonly onOpenUrl: (
     handler: (urls: string[]) => void,
-  ) => Promise<() => void>;
+  ) => Promise<() => void | Promise<void>>;
 }
 
 export interface TauriOpenerAdapter {
@@ -712,7 +712,10 @@ export function createTauriStrongholdSecureStore(
     | undefined;
 
   const store = () => {
-    storePromise ??= loadStrongholdStore(options);
+    storePromise ??= loadStrongholdStore(options).catch((error: unknown) => {
+      storePromise = undefined;
+      throw error;
+    });
     return storePromise;
   };
 
@@ -740,7 +743,10 @@ export function createTauriPersistentStrongholdPassword(
 ): () => Promise<string> {
   let passwordPromise: Promise<string> | undefined;
   return async () => {
-    passwordPromise ??= loadPersistentStrongholdPassword(options);
+    passwordPromise ??= loadPersistentStrongholdPassword(options).catch((error: unknown) => {
+      passwordPromise = undefined;
+      throw error;
+    });
     return passwordPromise;
   };
 }
@@ -750,7 +756,10 @@ export function createTauriKeystoreStrongholdPassword(
 ): () => Promise<string> {
   let passwordPromise: Promise<string> | undefined;
   return async () => {
-    passwordPromise ??= loadKeystoreStrongholdPassword(options);
+    passwordPromise ??= loadKeystoreStrongholdPassword(options).catch((error: unknown) => {
+      passwordPromise = undefined;
+      throw error;
+    });
     return passwordPromise;
   };
 }
@@ -788,7 +797,10 @@ function createTauriStore(
 ): MobilePersistentStore {
   let storePromise: Promise<TauriStoreHandle> | undefined;
   const store = () => {
-    storePromise ??= adapter.load(path);
+    storePromise ??= adapter.load(path).catch((error: unknown) => {
+      storePromise = undefined;
+      throw error;
+    });
     return storePromise;
   };
 

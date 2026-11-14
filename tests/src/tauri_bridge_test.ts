@@ -1220,6 +1220,79 @@ function memoryStore(): TauriStoreHandle {
   };
 }
 
+async function rejectsThenSharesSuccessfulInitialization(
+  read: () => Promise<unknown>, calls: () => number, failure: Error, expected: unknown,
+) {
+  const failed = await Promise.allSettled([read(), read()]);
+  expect(failed).toEqual([
+    { status: "rejected", reason: failure }, { status: "rejected", reason: failure },
+  ]);
+  expect(failed.every((result) => result.status === "rejected" && result.reason === failure)).toBe(true);
+  expect(calls()).toBe(1);
+  expect(await Promise.all([read(), read()])).toEqual([expected, expected]);
+  expect(calls()).toBe(2);
+  expect(await read()).toEqual(expected);
+  expect(calls()).toBe(2);
+}
+
+test("rejected native initialization: Store load can be retried on the same bridge", async () => {
+  let calls = 0;
+  const failure = new Error("temporary Store initialization failure");
+  const bridge = createTauriPluginNativeBridge({
+    appName: "Fixture", storePath: "fixture.json", isTauriRuntime: () => true,
+    deepLink: { getCurrent: async () => null, onOpenUrl: async () => () => {} },
+    opener: { openUrl: async () => {} },
+    store: { async load() { if (++calls === 1) throw failure; return memoryStore(); } },
+  });
+  await rejectsThenSharesSuccessfulInitialization(() => bridge.storage!.get("absent"), () => calls, failure, undefined);
+});
+
+test("rejected native initialization: Stronghold load can be retried on the same secure store", async () => {
+  let calls = 0;
+  const failure = new Error("temporary Stronghold initialization failure");
+  const client = { getStore: () => memoryStrongholdStore() };
+  const secure = createTauriStrongholdSecureStore({
+    vaultPath: "fixture.hold", password: "fixture-password", clientName: "fixture",
+    stronghold: { async load() {
+      if (++calls === 1) throw failure;
+      return { loadClient: async () => client, createClient: async () => client, save: async () => {} };
+    } },
+  });
+  await rejectsThenSharesSuccessfulInitialization(() => secure.get("absent"), () => calls, failure, undefined);
+});
+
+test("rejected native initialization: persistent password load can be retried on the same callback", async () => {
+  let calls = 0;
+  const failure = new Error("temporary password Store failure");
+  const handle = memoryStore();
+  const expected = "fixture.recovered-password-value";
+  await handle.set("fixture.password", expected);
+  const password = createTauriPersistentStrongholdPassword({
+    store: { async load() { if (++calls === 1) throw failure; return handle; } },
+    storePath: "fixture.json", key: "fixture.password", prefix: "fixture",
+  });
+  await rejectsThenSharesSuccessfulInitialization(password, () => calls, failure, expected);
+});
+
+test("rejected native initialization: keystore password load can be retried on the same callback", async () => {
+  let calls = 0;
+  const failure = new Error("temporary keystore read failure");
+  const expected = "fixture.recovered-password-value";
+  const password = createTauriKeystoreStrongholdPassword({
+    service: "fixture.mobile", user: "fixture-password",
+    keystore: {
+      store: async () => { throw new Error("unexpected password write"); },
+      remove: async () => { throw new Error("unexpected password deletion"); },
+      retrieve: async () => expected,
+    },
+    fallback: {
+      store: { async load() { if (++calls === 1) throw failure; return memoryStore(); } },
+      storePath: "fixture.json", key: "fixture.password", prefix: "fixture",
+    },
+  });
+  await rejectsThenSharesSuccessfulInitialization(password, () => calls, failure, expected);
+});
+
 function memorySecureStore() {
   const values = new Map<string, string>();
   return {

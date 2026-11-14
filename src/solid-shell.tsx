@@ -14,9 +14,12 @@ import {
 } from "./client.ts";
 import { resolvePushNotificationPath } from "./push-navigation.ts";
 import type {
+  HostDiscovery,
   MobileAccountSummary,
+  MobileCustomSignIn,
   MobileKnownHost,
   MobileProductAdapter,
+  MobileRetiredAccountScope,
   MobileSession,
   MobileSessionUnlockOptions,
   NativeBridge,
@@ -30,6 +33,7 @@ import {
 } from "./url.ts";
 import { mobileErrorMessage } from "./error.ts";
 import { copyMobileText } from "./shell.ts";
+import { createStartupRetry } from "./startup-retry.ts";
 import type {
   MobileShellHostAction,
   MobileShellHostActionContext,
@@ -88,6 +92,13 @@ export interface MobileShellCopy<Home> {
   readonly copyHostUrlLabel?: string;
   readonly copyHostUrlSuccessStatus?: string;
   readonly copyHostUrlFailedStatus?: string;
+  /**
+   * Generic startup failure shown when the controller's initial start
+   * rejects — never the raw storage or bridge exception text.
+   */
+  readonly startupFailedStatus?: string;
+  /** Label for the explicit startup retry next to startupFailedStatus. */
+  readonly startupRetryLabel?: string;
   readonly homeTitle: (home: Home | undefined) => string | undefined;
   readonly metricsLabel: string;
   readonly shortcutsLabel: string;
@@ -132,6 +143,16 @@ export interface MobileClientShellProps<Home> {
   readonly renderHomeExtra?: (
     context: MobileShellHomeExtraContext<Home>,
   ) => JSX.Element;
+  /** A product sign-in for the hosts it claims; see {@link MobileCustomSignIn}. */
+  readonly customSignIn?: MobileCustomSignIn;
+  /**
+   * See {@link CreateMobileClientControllerOptions.onAccountScopeRetired}:
+   * fired once per saved-account scope actually removed, never for transient
+   * teardown; a cleanup failure is reported through the status stream.
+   */
+  readonly onAccountScopeRetired?: (
+    scope: MobileRetiredAccountScope,
+  ) => Promise<void> | void;
 }
 
 export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
@@ -159,6 +180,8 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
     openHostRoute: props.openHostRoute,
     sessionUnlock: props.sessionUnlock,
     homeLabel: props.homeLabel,
+    customSignIn: props.customSignIn,
+    onAccountScopeRetired: props.onAccountScopeRetired,
   });
   const [state, setState] = createSignal<MobileClientState<Home>>(
     controller.getState(),
@@ -178,15 +201,27 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
   );
   let inputRef: HTMLInputElement | undefined;
   let unsubscribe: (() => void) | undefined;
+  // The initial start can reject (storage, bridge read) — keep the
+  // rejection off the unhandled-promise path, show a generic failure, and
+  // offer one explicit manual retry; the controller's own custody refuses
+  // before it could hold two live registrations.
+  const startupRetry = createStartupRetry(() => controller.start());
 
   onMount(() => {
     unsubscribe = controller.subscribe(setState);
-    void controller.start();
+    void startupRetry.attempt();
   });
 
   onCleanup(() => {
+    startupRetry.dispose();
     unsubscribe?.();
-    controller.stop();
+    try {
+      controller.stop();
+    } catch (error) {
+      // A stop that could not confirm its listener cleanup keeps custody
+      // inside the controller; surface it without rendering raw errors.
+      console.error("mobile client stop failed", error);
+    }
   });
 
   function openManualStep() {
@@ -275,7 +310,11 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
 
   const homeTitle = () =>
     props.copy.homeTitle(state().home) ?? props.copy.homeFallbackTitle;
-  const mobileClientMissing = (discovery: { readonly wireViolations?: readonly { readonly requirement: string }[] }) =>
+  // A host the product's own sign-in claims needs no mobile OIDC client id.
+  const customSignInHandles = (discovery: HostDiscovery) =>
+    props.customSignIn?.handles(discovery) === true;
+  const mobileClientMissing = (discovery: HostDiscovery) =>
+    !customSignInHandles(discovery) &&
     (discovery.wireViolations ?? []).some(
       (violation) =>
         violation.requirement === "oidc-host-advertises-a-mobile-client-id",
@@ -332,6 +371,21 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
       data-product={props.adapter.product}
       style={{ "--accent": props.adapter.accentColor }}
     >
+      <Show when={startupRetry.failed()}>
+        <section class="startup-failure" role="alert">
+          <p class="status">
+            {props.copy.startupFailedStatus ?? "起動に失敗しました。"}
+          </p>
+          <button
+            type="button"
+            class="primary"
+            disabled={startupRetry.starting()}
+            onClick={() => void startupRetry.attempt()}
+          >
+            {props.copy.startupRetryLabel ?? "再試行"}
+          </button>
+        </section>
+      </Show>
       <Show when={showSetup() && !state().discovery}>
         <section class="mobile-onboarding" data-step={setupMode()}>
           <Show when={state().addingAccount}>
@@ -494,7 +548,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                   {props.adapter.primaryActionLabel}
                 </button>
                 <p class="status" aria-live="polite">
-                  {state().status}
+                  {startupRetry.failed() ? "" : state().status}
                 </p>
               </form>
             </div>
@@ -604,8 +658,9 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
             </dl>
             <Show
               when={
-                (current().authMethods?.oidc ?? Boolean(current().oidcIssuer)) &&
-                !mobileClientMissing(current())
+                customSignInHandles(current()) ||
+                ((current().authMethods?.oidc ?? Boolean(current().oidcIssuer)) &&
+                  !mobileClientMissing(current()))
               }
             >
               <button type="button" class="primary" onClick={startSignIn}>
@@ -692,7 +747,9 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
                 {props.copy.unlockSessionLabel ?? "Unlock"}
               </button>
             </div>
-            <p class="status">{state().status}</p>
+            <p class="status">
+              {startupRetry.failed() ? "" : state().status}
+            </p>
             <Show when={state().accounts.length > 1}>
               <AccountRows
                 accounts={state().accounts}
@@ -757,7 +814,7 @@ export function MobileClientShell<Home>(props: MobileClientShellProps<Home>) {
               </button>
             </div>
             <p class="status" aria-live="polite">
-              {state().status}
+              {startupRetry.failed() ? "" : state().status}
             </p>
           </section>
         )}

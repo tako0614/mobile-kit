@@ -113,22 +113,46 @@ export async function saveMobileAccountSession(
 export async function loadActiveMobileAccountSession(
   input: MobileAccountStoreInput,
 ): Promise<MobileSession | undefined> {
-  return await withAccountLock(input.nativeBridge, async () => {
-    await migrateLegacySessionLocked(input);
-    const list = await readAccountList(input);
-    if (!list.activeId) return undefined;
-    return await loadAccountSessionLocked(input, list, list.activeId);
-  });
+  return sessionFromRead(await readMobileAccountSessionWithRetirement({
+    adapter: input.adapter,
+    nativeBridge: input.nativeBridge,
+  }));
 }
 
 export async function loadMobileAccountSession(
   input: MobileAccountIdInput,
 ): Promise<MobileSession | undefined> {
+  return sessionFromRead(await readMobileAccountSessionWithRetirement({
+    adapter: input.adapter,
+    nativeBridge: input.nativeBridge,
+    accountId: input.accountId,
+  }));
+}
+
+interface MobileAccountSessionRead {
+  readonly session?: MobileSession;
+  /** Present only after this locked read successfully removes the saved row. */
+  readonly retired?: MobileAccountSummary;
+  readonly failure?: { readonly error: unknown };
+}
+
+/** Internal controller seam; not exported by the package entry point. */
+export async function readMobileAccountSessionWithRetirement(
+  input: MobileAccountStoreInput & { readonly accountId?: string },
+): Promise<MobileAccountSessionRead> {
   return await withAccountLock(input.nativeBridge, async () => {
     await migrateLegacySessionLocked(input);
     const list = await readAccountList(input);
-    return await loadAccountSessionLocked(input, list, input.accountId);
+    // An explicitly missing id is never permission to load the active account.
+    const accountId = "accountId" in input ? input.accountId : list.activeId;
+    if (!accountId) return {};
+    return await loadAccountSessionLocked(input, list, accountId);
   });
+}
+
+function sessionFromRead(read: MobileAccountSessionRead): MobileSession | undefined {
+  if (read.failure) throw read.failure.error;
+  return read.session;
 }
 
 export async function setActiveMobileAccount(
@@ -259,29 +283,29 @@ async function loadAccountSessionLocked(
   input: MobileAccountStoreInput,
   list: MobileAccountList,
   accountId: string,
-): Promise<MobileSession | undefined> {
+): Promise<MobileAccountSessionRead> {
   const row = list.accounts.find((account) => account.id === accountId);
-  if (!row) return undefined;
+  if (!row) return {};
   const key = mobileAccountSessionStorageKey(input.adapter, row.id);
   const raw = await mobileCredentialStore(input.nativeBridge).get(key);
   if (!raw) {
     // The credential store lost the slot (reinstall, keystore reset): drop the
     // row instead of showing an account that can no longer sign requests.
     await removeAccountLocked(input, list, row.id);
-    return undefined;
+    return { retired: row };
   }
   let session: MobileSession;
   try {
     session = parseStoredMobileSession(raw, input.adapter.product);
   } catch (error) {
     await removeAccountLocked(input, list, row.id);
-    throw error;
+    return { retired: row, failure: { error } };
   }
   if (mobileAccountIdentity(session) !== mobileAccountIdentity(row)) {
     await removeAccountLocked(input, list, row.id);
-    throw new Error("Stored mobile session does not belong to its account.");
+    return { retired: row, failure: { error: new Error("Stored mobile session does not belong to its account.") } };
   }
-  return session;
+  return { session };
 }
 
 async function removeAccountLocked(
