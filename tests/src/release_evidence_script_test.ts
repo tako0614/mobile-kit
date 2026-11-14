@@ -6,10 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const rootDir = fileURLToPath(new URL("../../../", import.meta.url));
+const rootDir = fileURLToPath(new URL("../../", import.meta.url));
 const scriptPath = path.join(
   rootDir,
-  "mobile-kit/scripts/check-mobile-release-evidence.mjs",
+  "scripts/check-mobile-release-evidence.mjs",
 );
 
 test("mobile release evidence script validates public-safe release evidence", () => {

@@ -11,10 +11,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const rootDir = fileURLToPath(new URL("../../../", import.meta.url));
+const rootDir = fileURLToPath(new URL("../../", import.meta.url));
 const scriptPath = path.join(
   rootDir,
-  "mobile-kit/scripts/apply-tauri-mobile-push-native.mjs",
+  "scripts/apply-tauri-mobile-push-native.mjs",
 );
 
 for (const kotlinDsl of [true, false]) {
