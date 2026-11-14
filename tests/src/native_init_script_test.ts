@@ -12,10 +12,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const rootDir = fileURLToPath(new URL("../../../", import.meta.url));
+const rootDir = fileURLToPath(new URL("../../", import.meta.url));
 const scriptPath = path.join(
   rootDir,
-  "mobile-kit/scripts/init-tauri-mobile-native.mjs",
+  "scripts/init-tauri-mobile-native.mjs",
 );
 
 test("native init script generates then applies platform push wiring", () => {
