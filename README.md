@@ -245,6 +245,13 @@ UI.
 - Provide a shared Tauri mobile doctor script used by product shells to validate config, capability permissions, app icons, plugin wiring, and native toolchain readiness.
 - Provide a shared native-init wrapper that runs Tauri Android/iOS generation and
   immediately applies the selected product project's non-secret push wiring.
+  Android Google Services is applied only when `google-services.json` exists, so
+  ordinary debug builds can precede Firebase setup. Migration targets standard
+  generated Gradle layouts; custom Google Services references or unknown
+  `apply from` scripts are refused before mutation and need owner-managed wiring.
+  Known generated `tauri.build.gradle(.kts)` scripts are inspected as well.
+  Strict verification and release checks still require product-owned Firebase
+  configuration; a debug build does not qualify push delivery.
   Provider files, signing, and device evidence remain product/operator-owned.
 - Validate one release-evidence contract from both the strict evidence gate and
   the non-failing status reporter, so a status cannot report ready while signing,
@@ -359,11 +366,36 @@ bun ../mobile-kit/scripts/check-tauri-mobile.mjs \
   --dev-port 1420
 ```
 
+Plugin capability coverage uses the runtime dependency tables in `Cargo.toml`.
+Declarations for the same plugin are combined before checking permissions, so a
+plugin declared separately for desktop and mobile is not mistaken for a
+mobile-only plugin. Build/dev dependencies do not justify runtime permissions;
+a truly mobile-only plugin is still rejected in the desktop capability.
+This static check supports `target_os` predicates for Android, iOS, Linux,
+macOS and Windows, `any(...)` lists of those predicates, and `not(...)` around
+one predicate or such a list. Other target expressions fail explicitly rather
+than being guessed. TOML comments, dependency tables and package aliases are
+parsed using the installed Bun. Parser errors fail the check, but syntax
+acceptance depends on that Bun version; this is not a complete Cargo manifest
+validator. It does not resolve Cargo workspaces/features or qualify native
+registration and execution.
+
 To have the doctor verify the product-owned remote-push plugin wiring, add:
 
 ```sh
   --remote-push-plugin mobile-push
 ```
+
+The Android dev script may be `bunx tauri android dev`: Tauri's `--host`
+is optional. The doctor recognizes this direct command with an optional
+literal device name, `--open`/`-o`, `--force-ip-prompt`, and `--host` (with
+an optional literal address, also `--host=ADDRESS`). Other CLI options can
+be forwarded when invoking the package script. Shell wrappers, substitutions,
+comments and commands that merely mention `--host` are not accepted.
+Literal wildcard device addresses (`0.0.0.0`/`::`/`[::]`) are rejected;
+the doctor does not resolve DNS or validate network reachability. Vite's separate
+`TAURI_DEV_HOST` and host/HMR wiring and all native/release checks still apply;
+this static contract does not prove device selection or LAN reachability.
 
 The doctor then checks the product-owned plugin's capability, Rust
 registration, and native sources, and fails if the community

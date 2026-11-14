@@ -322,8 +322,9 @@ export interface MobileAccountList {
 
 /**
  * Why a saved private scope ended: an explicit sign-out of the active or a
- * saved account, or an issuer-invalidated session evicted after the
- * authorization server rejected its refresh. Transient teardown — `stop`, a
+ * saved account, or an invalidated session: its credential slot was missing,
+ * malformed or mismatched, or the authorization server rejected its refresh.
+ * Transient teardown — `stop`, a
  * session kept after a transient refresh failure, home load errors, unlock
  * retries, or process exit — never retires a scope.
  */

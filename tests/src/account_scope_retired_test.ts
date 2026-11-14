@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   createMobileClientController,
+  loadActiveMobileAccountSession,
+  loadMobileAccountSession,
+  loadMobileAccounts,
+  mobileAccountSessionStorageKey,
   mobileSessionStorageKey,
   type FetchLike,
   type MobileProductAdapter,
@@ -142,6 +146,165 @@ async function signInVia(
 
 /** The notification is detached; a macrotask drains it. */
 const drained = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("account session public read keeps explicit missing id separate from active selection", async () => {
+  const bridge = memoryBridge();
+  const controller = await twoAccounts(bridge, instances().fetch, () => {});
+  const accountA = controller.getState().accounts.find((row) => row.hostUrl === "https://a.example")!;
+  // JavaScript callers can omit a required TypeScript property. That must not
+  // become an implicit request for the active account's credential slot.
+  expect(await Reflect.apply(loadMobileAccountSession, undefined, [{ adapter, nativeBridge: bridge }])).toBeUndefined();
+  expect((await Reflect.apply(loadActiveMobileAccountSession, undefined, [{
+    adapter, nativeBridge: bridge, accountId: accountA.id,
+  }]))?.hostUrl).toBe("https://b.example");
+  expect(await loadMobileAccountSession({ adapter, nativeBridge: bridge, accountId: "unknown-account" })).toBeUndefined();
+  controller.stop();
+});
+
+for (const operation of ["sign-out", "switch", "restore"] as const) {
+  for (const defect of ["missing", "malformed", "host", "subject"] as const) {
+    test(`invalid stored account retirement: ${operation}/${defect}`, async () => {
+      const bridge = memoryBridge();
+      const { fetch } = instances();
+      const retired: MobileRetiredAccountScope[] = [];
+      let controller = await twoAccounts(bridge, fetch, (scope) => { retired.push(scope); });
+      const target = controller.getState().accounts.find((row) =>
+        row.hostUrl === (operation === "restore" ? "https://b.example" : "https://a.example"))!;
+      const key = mobileAccountSessionStorageKey(adapter, target.id);
+      const raw = await bridge.secureStore!.get(key);
+      if (defect === "missing") await bridge.secureStore!.delete(key);
+      else if (defect === "malformed") await bridge.secureStore!.set(key, "{");
+      else {
+        const session = JSON.parse(raw!);
+        if (defect === "host") session.hostUrl = "https://different.example";
+        else session.accountId = "different-subject";
+        await bridge.secureStore!.set(key, JSON.stringify(session));
+      }
+      if (operation === "restore") {
+        controller.stop();
+        controller = createMobileClientController({
+          adapter, nativeBridge: bridge, fetch,
+          onAccountScopeRetired: (scope) => { retired.push(scope); },
+        });
+      }
+      const act = () => operation === "sign-out" ? controller.signOutAccount(target.id)
+        : operation === "switch" ? controller.switchAccount(target.id) : controller.start();
+      let rejected = false;
+      try { await act(); } catch { rejected = true; }
+      expect(rejected).toBe(operation === "restore" && defect !== "missing");
+      await drained();
+      expect(retired).toEqual([{
+        id: target.id, hostUrl: target.hostUrl, product: target.product,
+        accountId: target.accountId, reason: operation === "sign-out" ? "signed-out" : "session-invalidated",
+      }]);
+      const saved = await loadMobileAccounts({ adapter, nativeBridge: bridge });
+      expect(saved.accounts).toHaveLength(1);
+      expect(saved.accounts.some((row) => row.id === target.id)).toBe(false);
+      expect(await bridge.secureStore!.get(key)).toBeUndefined();
+      if (operation !== "restore") expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+      await act();
+      await drained();
+      expect(retired).toHaveLength(1);
+      controller.stop();
+    });
+  }
+}
+
+test("invalid stored account retirement: failed credential read keeps the saved scope", async () => {
+  const backing = memoryBridge();
+  let blockedKey: string | undefined;
+  const bridge: ReturnType<typeof memoryBridge> = {
+    ...backing,
+    secureStore: {
+      ...backing.secureStore!,
+      async get(key) {
+        if (key === blockedKey) throw new Error("temporary credential read failure");
+        return await backing.secureStore!.get(key);
+      },
+    },
+  };
+  const retired: MobileRetiredAccountScope[] = [];
+  const controller = await twoAccounts(bridge, instances().fetch, (scope) => { retired.push(scope); });
+  const target = controller.getState().accounts.find((row) => row.hostUrl === "https://a.example")!;
+  blockedKey = mobileAccountSessionStorageKey(adapter, target.id);
+  await controller.switchAccount(target.id);
+  await drained();
+  expect(retired).toEqual([]);
+  expect((await loadMobileAccounts({ adapter, nativeBridge: bridge })).accounts).toHaveLength(2);
+  blockedKey = undefined;
+  await controller.switchAccount(target.id);
+  expect(controller.getState().session?.hostUrl).toBe("https://a.example");
+  controller.stop();
+});
+
+test("invalid stored account retirement: failed row removal cannot report retirement", async () => {
+  const backing = memoryBridge();
+  let blockWrites = false;
+  const bridge: ReturnType<typeof memoryBridge> = {
+    ...backing,
+    storage: {
+      ...backing.storage!,
+      async set(key, value) {
+        if (blockWrites && key.endsWith(".accounts")) throw new Error("temporary account write failure");
+        await backing.storage!.set(key, value);
+      },
+    },
+  };
+  const retired: MobileRetiredAccountScope[] = [];
+  const controller = await twoAccounts(bridge, instances().fetch, (scope) => { retired.push(scope); });
+  const target = controller.getState().accounts.find((row) => row.hostUrl === "https://a.example")!;
+  await bridge.secureStore!.delete(mobileAccountSessionStorageKey(adapter, target.id));
+  blockWrites = true;
+  await controller.switchAccount(target.id);
+  await drained();
+  expect(retired).toEqual([]);
+  expect((await loadMobileAccounts({ adapter, nativeBridge: bridge })).accounts).toHaveLength(2);
+  blockWrites = false;
+  await controller.switchAccount(target.id);
+  await drained();
+  expect(retired).toHaveLength(1);
+  controller.stop();
+});
+
+test("completed retirement survives a later sign-out storage failure", async () => {
+  const backing = memoryBridge();
+  const failure = new Error("account storage became unavailable after removal");
+  let removedId: string | undefined;
+  let removalCommitted = false;
+  const bridge: ReturnType<typeof memoryBridge> = {
+    ...backing,
+    storage: {
+      ...backing.storage!,
+      async set(key, value) {
+        if (key.endsWith(".accounts") && removalCommitted) throw failure;
+        await backing.storage!.set(key, value);
+        if (key.endsWith(".accounts") && removedId) {
+          const list = JSON.parse(value) as { accounts: { id: string }[] };
+          removalCommitted = list.accounts.every((row) => row.id !== removedId);
+        }
+      },
+    },
+  };
+  const retired: MobileRetiredAccountScope[] = [];
+  const controller = await twoAccounts(bridge, instances().fetch, (scope) => { retired.push(scope); });
+  const target = controller.getState().accounts.find((row) => row.hostUrl === "https://a.example")!;
+  removedId = target.id;
+  await bridge.secureStore!.delete(mobileAccountSessionStorageKey(adapter, target.id));
+  let rejected: unknown;
+  try { await controller.signOutAccount(target.id); } catch (error) { rejected = error; }
+  await drained();
+  expect(rejected).toBe(failure);
+  expect(removalCommitted).toBe(true);
+  const saved = await loadMobileAccounts({ adapter, nativeBridge: backing });
+  expect(saved.accounts).toHaveLength(1);
+  expect(saved.accounts.some((row) => row.id === target.id)).toBe(false);
+  expect(controller.getState().session?.hostUrl).toBe("https://b.example");
+  expect(retired).toEqual([{
+    id: target.id, hostUrl: target.hostUrl, product: target.product,
+    accountId: target.accountId, reason: "signed-out",
+  }]);
+  controller.stop();
+});
 
 async function twoAccounts(
   bridge: ReturnType<typeof memoryBridge>,

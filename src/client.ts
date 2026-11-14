@@ -23,7 +23,6 @@ import {
   completeMobileOidcSignIn,
   ensureFreshMobileSession,
   isOidcCallbackPayload,
-  loadMobileSession,
   MobileSessionRefreshError,
   mobileAuthRequestStorageKey,
   revokeMobileHostSession,
@@ -32,7 +31,7 @@ import {
 } from "./auth.ts";
 import {
   loadMobileAccounts,
-  loadMobileAccountSession,
+  readMobileAccountSessionWithRetirement,
   removeMobileAccountSession,
   removeMobileAccountSessionFor,
   saveMobileAccountSession,
@@ -177,7 +176,7 @@ export interface CreateMobileClientControllerOptions<Home = unknown> {
   readonly customSignIn?: MobileCustomSignIn;
   /**
    * Called once per saved-account scope the controller actually removes —
-   * an explicit sign-out or an issuer-invalidated session — after the saved
+   * an explicit sign-out or a discarded invalid session — after the saved
    * row is gone. Never fires for transient teardown: `stop`, a session kept
    * after a transient refresh failure, home load errors, unlock retries, or
    * process exit all leave the scope (and product-owned recoverable state
@@ -1122,10 +1121,13 @@ export function createMobileClientController<Home = unknown>(
         if (!ownsStart()) return;
         publish({ knownHosts });
 
-        const existingSession = await loadMobileSession({
+        const restored = await readMobileAccountSessionWithRetirement({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
         });
+        if (restored.retired) notifyAccountScopesRetired([restored.retired], "session-invalidated");
+        if (restored.failure) throw restored.failure.error;
+        const existingSession = restored.session;
         if (!ownsStart()) return;
         const accountList = accountListState(await loadAccountList());
         if (!ownsStart()) return;
@@ -1466,12 +1468,21 @@ export function createMobileClientController<Home = unknown>(
       // Another saved account: revoke and forget it without touching the
       // active session.
       let session: MobileSession | undefined;
+      const notifiedWhileLoading: MobileAccountSummary[] = [];
       try {
-        session = await loadMobileAccountSession({
+        const loaded = await readMobileAccountSessionWithRetirement({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           accountId,
         });
+        if (loaded.retired) {
+          // This removal is already committed. A later storage refusal must
+          // not discard its fact or make us report the same row twice.
+          notifiedWhileLoading.push(loaded.retired);
+          notifyAccountScopesRetired([loaded.retired], "signed-out");
+        }
+        if (loaded.failure) throw loaded.failure.error;
+        session = loaded.session;
       } catch {
         session = undefined;
       }
@@ -1483,7 +1494,8 @@ export function createMobileClientController<Home = unknown>(
             nativeBridge: options.nativeBridge,
             accountId,
           });
-          return { list: after, retired: removedAccountRows(before, after) };
+          return { list: after, retired: removedAccountRows(before, after)
+            .filter((row) => !notifiedWhileLoading.some((retired) => retired.id === row.id)) };
         },
       );
       publish({ ...accountListState(list), status: copy.signedOutStatus });
@@ -1503,11 +1515,14 @@ export function createMobileClientController<Home = unknown>(
       const switchEpoch = sessionLifecycleEpoch;
       let target: MobileSession | undefined;
       try {
-        target = await loadMobileAccountSession({
+        const loaded = await readMobileAccountSessionWithRetirement({
           adapter: options.adapter,
           nativeBridge: options.nativeBridge,
           accountId,
         });
+        if (loaded.retired) notifyAccountScopesRetired([loaded.retired], "session-invalidated");
+        if (loaded.failure) throw loaded.failure.error;
+        target = loaded.session;
       } catch (error) {
         publish({
           ...accountListState(await loadAccountList()),
